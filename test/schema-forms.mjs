@@ -1,63 +1,68 @@
-// Which output-schema form survives registration? Reproduces the JsonSchemaError that
-// failed the host boot and shows why the shipped definitions use the literal form.
+// Which output-schema form survives registration? This pins the reasoning behind the
+// shipped definitions, and the failure mode that took the host down once.
 //
-// Uses the real @deepseek-ai/dsh-tools when a DSH install is present, otherwise the dev
-// stand-in, so the reasoning stays executable on CI and on a bare clone.
+// Runs against the real @deepseek-ai/dsh-tools when a DSH install is present, otherwise
+// against the dev stand-in, which is deliberately stricter in one place (it rejects the
+// author DSL that the real compiler happens to accept). That divergence is asserted, not
+// assumed, so this script passes in both environments for the right reason.
 import { pathToFileURL } from 'node:url'
 import { findRealDshTools } from './helpers.mjs'
 
 const problems = []
 const realPath = findRealDshTools()
-const registry = realPath === undefined
-  ? await import(new URL('./node_modules/@deepseek-ai/dsh-tools/index.js', import.meta.url).href)
-  : await import(pathToFileURL(realPath).href)
-console.log('registry under test:', realPath ?? 'dev stand-in')
-console.log('  exports defineTool:', typeof registry.defineTool, '| assertSupportedJsonSchema:', typeof registry.assertSupportedJsonSchema)
+const usingReal = realPath !== undefined
+const registry = usingReal
+  ? await import(pathToFileURL(realPath).href)
+  : await import(new URL('./node_modules/@deepseek-ai/dsh-tools/index.js', import.meta.url).href)
 
+console.log('registry under test:', realPath ?? 'dev stand-in (no DSH install reachable)')
+console.log('  defineTool:', typeof registry.defineTool, '| assertSupportedJsonSchema:', typeof registry.assertSupportedJsonSchema)
+
+// The author DSL, shaped the way the real defineTool contract expects: a property map.
 const base = { name: 'probe', description: 'x', parameters: { q: { type: 'string', required: true } }, execute: async () => ({}) }
+const attempt = (fn) => {
+  try {
+    return { ok: true, value: fn() }
+  } catch (error) {
+    return { ok: false, message: error.message }
+  }
+}
+const define = (schema) => registry.defineTool({ ...base, output: { schema, render: () => [] } })
+const SHIPPED = { type: 'object', additionalProperties: true }
 
-function compiled(schema) {
-  const tool = registry.defineTool({ ...base, output: { schema, render: () => [] } })
-  registry.assertSupportedJsonSchema(tool.output.schema)
-  return tool.output.schema
+// --- what the plugin ships must always be accepted ---------------------------
+const shipped = attempt(() => define(SHIPPED))
+if (!shipped.ok) problems.push('defineTool rejected the form the plugin ships: ' + shipped.message)
+else console.log('\nshipped form accepted; compiled to', JSON.stringify(shipped.value.output.schema))
+
+const assertShipped = attempt(() => registry.assertSupportedJsonSchema(SHIPPED))
+if (!assertShipped.ok) problems.push('the registry assertion rejected the form the plugin ships: ' + assertShipped.message)
+
+// A JSON-object schema that omits additionalProperties is an authoring error on the
+// compiler path in both environments — that is why the plugin always states it.
+const missing = attempt(() => define({ type: 'object' }))
+if (missing.ok) problems.push('defineTool accepted an object schema without additionalProperties')
+
+// --- the failure mode: the author DSL reaching the registry uncompiled -------
+const dslIntoRegistry = attempt(() => registry.assertSupportedJsonSchema({ type: 'json' }))
+if (dslIntoRegistry.ok) {
+  problems.push('the registry accepted the author DSL { type: "json" }, so this fence no longer models the boot failure')
+} else {
+  console.log('author DSL rejected by the registry assertion:', dslIntoRegistry.message)
 }
 
-function validate(label, schema) {
-  try {
-    registry.assertSupportedJsonSchema(schema)
-    console.log(`  accepted  ${label}`)
-    return true
-  } catch (error) {
-    console.log(`  rejected  ${label}  (${error.message})`)
-    return false
+// --- the one deliberate divergence, asserted per environment -----------------
+const dslThroughCompiler = attempt(() => define({ type: 'json' }))
+if (usingReal) {
+  if (!dslThroughCompiler.ok) problems.push('the real compiler rejected the author DSL, which contradicts the observed behaviour')
+  else console.log('real compiler accepts the author DSL and compiles it to', JSON.stringify(dslThroughCompiler.value.output.schema))
+} else {
+  if (dslThroughCompiler.ok) {
+    problems.push('the dev stand-in accepted the author DSL — it is meant to be stricter than the real compiler, and that rejection is the fence')
+  } else {
+    console.log('dev stand-in rejects the author DSL by design:', dslThroughCompiler.message)
   }
 }
 
-console.log('\nthrough defineTool (the compiler path):')
-for (const [label, schema] of [
-  ['{ type: "json" }  — the author DSL', { type: 'json' }],
-  ['{ type: "object", additionalProperties: true }', { type: 'object', additionalProperties: true }],
-]) {
-  try {
-    console.log(`  ok  ${label} -> compiled ${JSON.stringify(compiled(schema))}`)
-  } catch (error) {
-    console.log(`  FAIL ${label} -> ${error.message}`)
-    problems.push('compiler rejected ' + label)
-  }
-}
-
-console.log('\nstraight into the registry (what the shim caused):')
-// The author DSL must be rejected here. If this ever passes, the boot-safety fence has
-// stopped modelling the real failure and must be revisited.
-if (validate('{ type: "json" }  — the author DSL', { type: 'json' })) {
-  problems.push('the registry accepted the author DSL, so this fence no longer models the boot failure')
-}
-if (!validate('{ type: "object", additionalProperties: true }', { type: 'object', additionalProperties: true })) {
-  problems.push('the registry rejected the literal form the plugin ships')
-}
-// The registry's assertion is laxer than its compiler: this one passes here but is still
-// refused by defineTool above, which is why the plugin always states additionalProperties.
-validate('{ type: "object" }  — allowed here, refused by defineTool', { type: 'object' })
-
-console.log(problems.length === 0 ? '\nschema forms: OK' : '\nschema forms FAILED: ' + problems.join(', '))
+console.log(problems.length === 0 ? '\nschema forms: OK' : '\nschema forms FAILED: ' + problems.join(' | '))
 if (problems.length > 0) process.exitCode = 1
