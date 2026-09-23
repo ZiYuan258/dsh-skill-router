@@ -47,6 +47,24 @@ check('OR fallback explains itself', String(loose.note).includes('match only som
 
 const single = await search.execute({ query: 'nonexistentword' }, exec)
 check('a single keyword never reports OR fallback', single.fallback === 'none' && single.hits.length === 0, 'fallback=' + single.fallback)
+check('an empty result points at explain', String(single.note).includes('explain'), String(single.note))
+
+// --- 1c. explain: the answer to "why did this match / not match" --------------
+console.log('\nexplain (observability):')
+const plain = await search.execute({ query: 'alpha widgets' }, exec)
+check('explain is off by default', plain.hits.every((hit) => hit.why === undefined))
+
+const explained = await search.execute({ query: 'alpha widgets', explain: true }, exec)
+check('explain reports the flag', explained.explain === true)
+const explainedHit = explained.hits.find((hit) => hit.name === 'alpha-widgets')
+check('each hit carries a score', typeof explainedHit?.score === 'number' && explainedHit.score > 0, String(explainedHit?.score))
+check('each hit carries per-keyword reasons', Array.isArray(explainedHit?.why) && explainedHit.why.length >= 2, JSON.stringify(explainedHit?.why))
+check('the reason names the field that matched', explainedHit.why.some((line) => line.includes('name')), JSON.stringify(explainedHit?.why))
+check('the card prints the reasons', search.output.render({}, explained)[0].text.includes('why:'))
+
+// In the loose pass, a missed keyword must appear as a dash rather than being dropped.
+const looseExplained = await search.execute({ query: 'widgets beta', explain: true }, exec)
+check('the OR pass records the misses too', looseExplained.hits.every((hit) => hit.why.some((line) => line.endsWith('-'))), JSON.stringify(looseExplained.hits[0]?.why))
 
 // --- 1b. the optional whenToUse column ---------------------------------------
 // DSH skills may carry a whenToUse frontmatter field; upstream libraries usually leave it

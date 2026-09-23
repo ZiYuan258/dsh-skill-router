@@ -492,6 +492,10 @@ export function buildSkillRouterTools(ctx, register) {
           description: 'Optional repo filter, matched case-insensitively against the upstream directory name, e.g. "trailofbits" or "microsoft-skills".',
         },
         names_only: { type: 'boolean', description: 'Return only names and repos, with no descriptions, when you just need to see what exists.' },
+        explain: {
+          type: 'boolean',
+          description: 'Also return how each hit scored, per keyword and per field. Use it to diagnose a search that returned nothing or the wrong thing — it shows which field matched and by how much.',
+        },
       },
       required: ['query'],
     },
@@ -518,6 +522,9 @@ export function buildSkillRouterTools(ctx, register) {
           if (String(hit.whenToUse) !== '' && String(hit.whenToUse) !== String(hit.description)) {
             lines.push('    when: ' + String(hit.whenToUse))
           }
+          if (Array.isArray(hit.why)) {
+            lines.push('    why: ' + hit.why.join('; '))
+          }
         }
         if (String(result.error) !== '') lines.push('error: ' + String(result.error))
         return [{ type: 'text', text: lines.join('\n') }]
@@ -528,6 +535,7 @@ export function buildSkillRouterTools(ctx, register) {
       const limit =
         typeof input.limit === 'number' && Number.isFinite(input.limit) ? Math.max(1, Math.min(40, Math.floor(input.limit))) : 12
       const namesOnly = input.names_only === true
+      const explaining = input.explain === true
       const descLength = namesOnly ? 0 : DEFAULT_DESC
       const repoFilter = typeof input.repo === 'string' ? input.repo.toLowerCase() : ''
       const query = typeof input.query === 'string' ? input.query : ''
@@ -553,26 +561,42 @@ export function buildSkillRouterTools(ctx, register) {
         let score = 0
         let nameHits = 0
         let matchCount = 0
+        const why = explaining ? [] : undefined
         for (const token of tokens) {
           let part = 0
+          const fields = []
           if (nameText.includes(token)) {
             part += 100
             nameHits += 1
+            fields.push('name')
           }
-          if (descText.includes(token)) part += 24
+          if (descText.includes(token)) {
+            part += 24
+            fields.push('description')
+          }
           // A whenToUse value IS trigger phrasing, so a hit there says more about intent
           // than a hit in prose does — scored above description, below the name.
-          if (whenText !== '' && whenText.includes(token)) part += 40
-          if (pathText.includes(token)) part += 6
+          if (whenText !== '' && whenText.includes(token)) {
+            part += 40
+            fields.push('whenToUse')
+          }
+          if (pathText.includes(token)) {
+            part += 6
+            fields.push('path')
+          }
           if (part === 0) {
             if (requireAll) return undefined
+            if (why !== undefined) why.push(token + ': -')
             continue
           }
           matchCount += 1
           score += part
+          if (why !== undefined) why.push(token + ': +' + String(part) + ' (' + fields.join('+') + ')')
         }
-        if (nameText === query.trim().toLowerCase()) score += 400
-        return { row, score, matchCount, nameHits, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
+        const exact = nameText === query.trim().toLowerCase()
+        if (exact) score += 400
+        if (why !== undefined && exact) why.push('exact name: +400')
+        return { row, score, matchCount, nameHits, why, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
       }
 
       const collect = (requireAll) => {
@@ -616,6 +640,9 @@ export function buildSkillRouterTools(ctx, register) {
           // copy count is what tells the model `copies` is worth disambiguating.
           copies: copiesOf(entry.row.name),
           matchCount: entry.matchCount,
+          // Only present when the caller asked to explain, so the normal path pays nothing
+          // for it. This is the answer to "why did this query match / not match".
+          ...(entry.why === undefined ? {} : { score: entry.score, why: entry.why }),
           path: located.path,
           libraryRelative: entry.row.repo + '/' + entry.row.relpath,
         })
@@ -630,9 +657,10 @@ export function buildSkillRouterTools(ctx, register) {
         fallback,
         hits,
         error: '',
+        explain: explaining,
         note:
           hits.length === 0
-            ? 'No library match. Try broader or different keywords, or drop the repo filter.'
+            ? 'No library match. Try broader or different keywords, or drop the repo filter; rerun with explain: true to see how each keyword scored against each field.'
             : fallback === 'or'
               ? 'No skill matched every keyword, so these match only some (see matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
               : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.',
@@ -691,7 +719,11 @@ export function buildSkillRouterTools(ctx, register) {
     if (directory === '') {
       // Not in the library: fall back to the resident registry, which also covers
       // the bundled skills and any name the filesystem roots did not index.
-      const skills = ctx.get('skills')
+      //
+      // `ctx.get` is itself optional: on a host that does not expose it the fallback is
+      // simply unavailable, and saying so beats throwing `ctx.get is not a function`
+      // (which is what this did before a minimal-host test caught it).
+      const skills = typeof ctx.get === 'function' ? ctx.get('skills') : undefined
       if (skills !== undefined) {
         let definition
         try {

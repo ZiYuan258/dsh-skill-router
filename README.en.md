@@ -5,8 +5,21 @@ English | [中文](README.md)
 A DeepSeek Harness **Host plugin** that adds three tools — `skill_search`, `skill_load` and `skill_ref` — so an agent can pick its own skills from a library instead of paying for every skill on every turn.
 
 - **Zero dependencies.** No `import` of any kind, no `node_modules`, nothing to install.
-- **Zero catalog cost.** The three tools cost a few hundred characters of schema; the library itself is never injected.
+- **A fixed catalog cost that does not grow with the library.** The three tool schemas total **3,603 B ≈ 1,001 tokens per turn** (measured, independent of session length); the library itself is never injected.
 - **Agent-driven selection.** The routing rules live in the tool descriptions, so the model decides — the user is not asked to pick.
+
+### The cost, stated honestly
+
+Tool-driven retrieval is not free, and it costs in **two** places — a README should not only mention the one it saves:
+
+| Cost | Measured | Notes |
+|---|---|---|
+| Resident schemas | **3,603 B ≈ 1,001 tokens/turn** | description + parameters of all three tools, paid on every request. **Fixed**, independent of library size |
+| One search round-trip | one model tool call + the result body (about **1,533 B ≈ 426 tokens** at `limit=12`) | The extra step you pay for reaching past the catalog |
+
+The two cheapest ways to cut that: **lower `limit`** (or use `names_only: true`, roughly 60% smaller), and **call `skill_load` directly when you already know the name**, skipping search entirely.
+
+For comparison: a 28-skill resident catalog measured **1,541 tokens/turn**. Swapping 1,541 + 3,603 B for "keep six resident plus the tools" is where the arithmetic works. **If your library is small — a dozen or two skills — this plugin is not worth it**; a resident catalog is cheaper.
 
 ## Why this exists
 
@@ -18,7 +31,7 @@ This plugin closes that gap. Skills you want auto-triggered stay resident; every
 
 ## Install
 
-Requires a DSH installation (`dsh >= 0.1.5-rc.1`) and a profile. `dsh plugin` forwards to `pnpm` in the profile directory and reconciles the bundle list.
+Requires a DSH installation and a profile. `dsh.engines.dsh` declares `>=0.1.5-rc.1` — that is the **verified** floor, not a claim that newer is required: the plugin uses only `ctx.tools.register` and `ctx.fs.*`, with no event hooks and no imports. Older versions simply have not been verified, and **over-claiming compatibility would be worse than being conservative**. `ctx.get`, `ctx.effect` and `ctx.skills` are all **optional** and degrade rather than crash when absent, which `test/minimal-host.mjs` pins. `dsh plugin` forwards to `pnpm` in the profile directory and reconciles the bundle list.
 
 ```sh
 # from git (recommended)
