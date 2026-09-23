@@ -100,6 +100,13 @@ export function makeFixture() {
     writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n# ${skill.name}\n\nFixture body for ${skill.name}.\n`, 'utf8')
     rows.push([skill.repo, skill.relpath, skill.name, skill.description, '1', '1'].map((cell) => `"${cell}"`).join('\t'))
   }
+  // A bundled reference tree, so skill_ref has something real to read: a nested file, a
+  // binary file, and a path that climbs out of the skill directory.
+  const referenceDir = join(indexDir, 'beta-skills', 'skills', 'beta-gadgets', 'reference')
+  mkdirSync(referenceDir, { recursive: true })
+  writeFileSync(join(referenceDir, 'playbook.md'), '# Playbook\n\nReference detail for beta gadgets.\n', 'utf8')
+  writeFileSync(join(referenceDir, 'binary.bin'), Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe]), 'utf8')
+  writeFileSync(join(indexDir, 'outside.txt'), 'not part of any skill\n', 'utf8')
   writeFileSync(join(indexDir, 'skill-index.tsv'), rows.join('\r\n'), 'utf8')
   return root
 }

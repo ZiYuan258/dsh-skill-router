@@ -157,7 +157,34 @@ function splitRequestedNames(value) {
 
 function joinPath(dir, child) {
   if (dir === '') return child
-  return dir.endsWith('/') ? dir + child : dir + '/' + child
+  return dir.endsWith('/') || dir.endsWith('\\') ? dir + child : dir + '/' + child
+}
+
+/**
+ * Collapse a path to forward slashes with `.` and `..` resolved, without importing
+ * `node:path` — this plugin has no imports at all, and the containment check for
+ * `skill_ref` needs one canonical spelling to compare against.
+ *
+ * Pure string work on purpose: it must not touch the filesystem, because the whole point
+ * is to reject `../` before any I/O happens. Exported so the containment rule can be unit
+ * tested directly rather than only through a live tool call.
+ *
+ * @param path - any mix of separators.
+ * @returns the normalized path (a leading `/` or `X:` root is preserved).
+ */
+export function resolvePath(path) {
+  const text = String(path ?? '').replace(/\\/g, '/')
+  const root = /^[A-Za-z]:\//.test(text) ? text.slice(0, 3) : text.startsWith('/') ? '/' : ''
+  const parts = []
+  for (const segment of text.slice(root.length).split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      if (parts.length > 0) parts.pop()
+      continue
+    }
+    parts.push(segment)
+  }
+  return root + parts.join('/')
 }
 
 function splitLines(text) {
@@ -242,8 +269,26 @@ function tokenize(query) {
   return tokens
 }
 
+/** Shorten one display line (search hit descriptions). Silent by design: this is presentation. */
 function truncate(text, max) {
   return text.length <= max ? text : text.slice(0, max - 1) + '\u2026'
+}
+
+/**
+ * Clamp a body to `max` characters and say whether anything was dropped.
+ *
+ * The previous version returned only the text and its callers guessed with
+ * `text.length > max`, which can never be true after a clamp — so an oversized body was
+ * reported as clean. Returning the truncation fact alongside the text is what makes the
+ * warning trustworthy.
+ *
+ * @param text - the full body.
+ * @param max - inclusive character cap.
+ * @returns the body (clamped to `max` when needed) and whether it lost characters.
+ */
+function clampBody(text, max) {
+  if (text.length <= max) return { text, truncated: false, originalLength: text.length }
+  return { text: text.slice(0, max - 1) + '\u2026', truncated: true, originalLength: text.length }
 }
 
 /** The tool runtime requires lossless-JSON return values: no undefined, no live objects. */
@@ -376,6 +421,50 @@ export function buildSkillRouterTools(ctx, register) {
     return await walkForSkill(rootDir, wanted, { left: 120 }, 0, signal)
   }
 
+  /**
+   * Resolve a skill name (plus optional repo hint) to its directory on disk.
+   * Shared by skill_load and skill_ref so both agree on which copy of a name wins.
+   * @returns `{ directory, repo, copies }`, or `{ error }` when nothing matches.
+   */
+  async function locateSkill(rawName, repoHint, cwd, signal, exec) {
+    const wanted = normName(String(rawName ?? ''))
+    const wantedLower = wanted.toLowerCase()
+    const wantedRepo = String(repoHint ?? '').trim().toLowerCase()
+    if (wanted === '') return { error: 'a skill name is required' }
+    const loaded = await loadIndex(cwd, signal)
+    if (loaded.rows.length > 0) {
+      // Deterministic pick among duplicates: explicit repo first, then the shallowest
+      // relpath, which selects `skills/<name>` over `plugins/<x>/skills/<name>`.
+      const byName = loaded.rows.filter((row) => row.name.toLowerCase() === wantedLower)
+      let candidates = byName
+      if (wantedRepo !== '') candidates = candidates.filter((row) => row.repo.toLowerCase().indexOf(wantedRepo) >= 0)
+      if (byName.length > 0 && candidates.length === 0) {
+        const repos = [...new Set(byName.map((row) => row.repo))].sort()
+        return { error: 'skill "' + wanted + '" is not in a repo matching "' + wantedRepo + '"; it exists in: ' + repos.join(', ') }
+      }
+      candidates.sort((a, b) => {
+        const depthA = a.relpath.split('/').filter(Boolean).length
+        const depthB = b.relpath.split('/').filter(Boolean).length
+        if (depthA !== depthB) return depthA - depthB
+        if (a.relpath.length !== b.relpath.length) return a.relpath.length - b.relpath.length
+        return a.relpath < b.relpath ? -1 : 1
+      })
+      const winner = candidates[0]
+      if (winner !== undefined) {
+        const located = await resolveRow(winner)
+        return { directory: located.directory, repo: winner.repo, copies: copiesOf(winner.name) }
+      }
+    }
+    if (isSafeName(wantedLower)) {
+      const scanned = await scanForSkill(wantedLower, signal)
+      if (scanned !== '') return { directory: scanned, repo: '', copies: 1 }
+    }
+    if (wantedRepo !== '') {
+      return { error: 'no skill named "' + wanted + '" in a repo matching "' + wantedRepo + '"' }
+    }
+    return { error: 'no skill named "' + wanted + '" in the library. Call skill_search to find the exact name.' }
+  }
+
   const searchTool = definePortableTool({
     name: 'skill_search',
     description: SEARCH_DESCRIPTION,
@@ -435,15 +524,18 @@ export function buildSkillRouterTools(ctx, register) {
       if (tokens.length === 0 && repoFilter === '') {
         return jsonSafe({ library: loaded.root, total: 0, shown: 0, hits: [], error: 'the query must contain at least one letter or digit' })
       }
-      const scored = []
-      for (const row of loaded.rows) {
-        if (repoFilter !== '' && !row.repo.toLowerCase().includes(repoFilter)) continue
+      // Two passes over the same scoring: `all` requires every keyword, `any` accepts a
+      // partial match. The strict pass runs first and wins whenever it finds anything, so
+      // the loose pass only rescues a query that would otherwise return nothing — the
+      // common case for keyword-AND search. Loose hits are labelled with matchCount so the
+      // model can tell a real hit from a near-miss instead of trusting them equally.
+      const scoreRow = (row, requireAll) => {
         const nameText = row.name.toLowerCase()
         const descText = row.description.toLowerCase()
         const pathText = (row.repo + '/' + row.relpath).toLowerCase()
         let score = 0
         let nameHits = 0
-        let ok = true
+        let matchCount = 0
         for (const token of tokens) {
           let part = 0
           if (nameText.includes(token)) {
@@ -453,17 +545,36 @@ export function buildSkillRouterTools(ctx, register) {
           if (descText.includes(token)) part += 24
           if (pathText.includes(token)) part += 6
           if (part === 0) {
-            ok = false
-            break
+            if (requireAll) return undefined
+            continue
           }
+          matchCount += 1
           score += part
         }
-        if (!ok) continue
         if (nameText === query.trim().toLowerCase()) score += 400
-        scored.push({ row, score, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0, nameHits })
+        return { row, score, matchCount, nameHits, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
       }
+
+      const collect = (requireAll) => {
+        const found = []
+        for (const row of loaded.rows) {
+          if (repoFilter !== '' && !row.repo.toLowerCase().includes(repoFilter)) continue
+          const scored = scoreRow(row, requireAll)
+          if (scored !== undefined) found.push(scored)
+        }
+        return found
+      }
+
+      let scored = collect(true)
+      let fallback = 'none'
+      if (scored.length === 0 && tokens.length > 1) {
+        scored = collect(false)
+        if (scored.length > 0) fallback = 'or'
+      }
+
       scored.sort((a, b) => {
         if (b.listed !== a.listed) return b.listed - a.listed
+        if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
         if (b.score !== a.score) return b.score - a.score
         if (b.nameHits !== a.nameHits) return b.nameHits - a.nameHits
         if (a.row.name.length !== b.row.name.length) return a.row.name.length - b.row.name.length
@@ -481,6 +592,7 @@ export function buildSkillRouterTools(ctx, register) {
           // skills/, plugins/<x>/skills/ and antigravity/skills/. Reporting the
           // copy count is what tells the model `copies` is worth disambiguating.
           copies: copiesOf(entry.row.name),
+          matchCount: entry.matchCount,
           path: located.path,
           libraryRelative: entry.row.repo + '/' + entry.row.relpath,
         })
@@ -492,12 +604,15 @@ export function buildSkillRouterTools(ctx, register) {
         shown: hits.length,
         names_only: namesOnly,
         more: scored.length > hits.length,
+        fallback,
         hits,
         error: '',
         note:
           hits.length === 0
             ? 'No library match. Try broader or different keywords, or drop the repo filter.'
-            : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.',
+            : fallback === 'or'
+              ? 'No skill matched every keyword, so these match only some (see matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
+              : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.',
       })
     },
     presentCall(args) {
@@ -564,6 +679,7 @@ export function buildSkillRouterTools(ctx, register) {
         if (definition !== undefined) {
           const resourceBase = definition.resourceBase
           const body = String(definition.content)
+          const clamped = clampBody(body, LOAD_CAP)
           return jsonSafe({
             name: String(definition.name),
             source: 'resident',
@@ -571,9 +687,12 @@ export function buildSkillRouterTools(ctx, register) {
             copies: 1,
             path: definition.path === undefined ? '' : String(definition.path),
             resourceDir: resourceBase !== undefined && resourceBase.kind === 'directory' ? String(resourceBase.path) : '',
-            content: truncate(body, LOAD_CAP),
+            content: clamped.text,
             referenceFiles: [],
-            error: body.length > LOAD_CAP ? 'content truncated at ' + String(LOAD_CAP) + ' characters' : '',
+            truncated: clamped.truncated,
+            error: clamped.truncated
+              ? 'content truncated at ' + String(LOAD_CAP) + ' of ' + String(clamped.originalLength) + ' characters; read the full file at ' + (definition.path === undefined ? 'its path' : String(definition.path))
+              : '',
           })
         }
       }
@@ -607,6 +726,7 @@ export function buildSkillRouterTools(ctx, register) {
       /* a listing failure is not fatal: the body is what matters */
     }
     const text = body.trim()
+    const clamped = clampBody(text, LOAD_CAP)
     return jsonSafe({
       name: wanted,
       source: 'library',
@@ -614,9 +734,12 @@ export function buildSkillRouterTools(ctx, register) {
       copies: chosen === null ? 0 : copiesOf(chosen.name),
       path: skillPath,
       resourceDir: directory,
-      content: truncate(text, LOAD_CAP),
+      content: clamped.text,
       referenceFiles,
-      error: text.length > LOAD_CAP ? 'content truncated at ' + String(LOAD_CAP) + ' characters' : '',
+      truncated: clamped.truncated,
+      error: clamped.truncated
+        ? 'content truncated at ' + String(LOAD_CAP) + ' of ' + String(clamped.originalLength) + ' characters; read the full file at ' + skillPath
+        : '',
     })
   }
 
@@ -701,9 +824,131 @@ export function buildSkillRouterTools(ctx, register) {
     },
   })
 
+  /**
+   * Read one file bundled with a skill, instead of loading the whole directory.
+   *
+   * A SKILL.md routinely points at references/, scripts/ and assets/ that the task may
+   * never need; reading them on demand is where the token saving actually lives.
+   */
+  const refTool = definePortableTool({
+    name: 'skill_ref',
+    description:
+      'Read one file bundled with a skill (a path under its base directory), or list what is bundled with `list: true`. ' +
+      'Use it after skill_load when the instructions point at a reference, script or asset and you do not want to pull the whole directory into context. ' +
+      'The skill name must be one skill_search reported, and `path` is relative to the base directory that skill_load returned.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Exact skill name, e.g. "semgrep".' },
+        path: {
+          type: 'string',
+          description: 'File path relative to the skill base directory, e.g. "references/rulesets.md". Omit it when listing.',
+        },
+        repo: { type: 'string', description: 'Optional upstream repo filter, for a name that exists several times.' },
+        list: { type: 'boolean', description: 'List every bundled file under the base directory instead of reading one; the tree is capped, so a deep skill may report more entries than it shows.' },
+      },
+      required: ['name'],
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render(_args, value) {
+        const result = isRecord(value) ? value : {}
+        if (String(result.error) !== '') {
+          return [{ type: 'text', text: 'skill_ref failed for "' + String(result.name) + '": ' + String(result.error) }]
+        }
+        if (Array.isArray(result.files)) {
+          const lines = [
+            'Bundled with ' + String(result.name) + ' (' + String(result.baseDir) + '):',
+            ...result.files.map((file) => '  ' + String(file)),
+          ]
+          if (result.more === true) lines.push('  … (' + String(result.total) + ' entries total)')
+          return [{ type: 'text', text: lines.join('\n') }]
+        }
+        const lines = [
+          '# ' + String(result.name) + ' :: ' + String(result.path) + '  (' + String(result.bytes) + ' bytes)',
+          '',
+          String(result.content),
+        ]
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const input = isRecord(args) ? args : {}
+      const rawName = String(input.name ?? '')
+      const base = { name: rawName, repo: '', path: '', baseDir: '', content: '', bytes: 0, files: undefined, total: 0, more: false, error: '' }
+      const cwd = exec.agent === undefined ? '' : String(exec.agent.session.header.cwd)
+      const located = await locateSkill(rawName, input.repo, cwd, exec.signal, exec)
+      if (located.error !== undefined) {
+        base.error = located.error
+        return jsonSafe(base)
+      }
+      base.baseDir = located.directory
+      base.repo = located.repo
+      const root = resolvePath(located.directory)
+
+      if (input.list === true) {
+        const files = []
+        const walk = async (dir, prefix, budget) => {
+          if (budget.left <= 0) return
+          budget.left -= 1
+          let entries
+          try {
+            entries = await ctx.fs.listDir(await ctx.fs.resolve(dir, { signal: exec.signal }), exec.signal)
+          } catch {
+            return
+          }
+          for (const entry of entries) {
+            if (files.length < MAX_LISTED * 8) files.push(prefix + entry.name + (entry.type === 'directory' ? '/' : ''))
+            if (entry.type === 'directory') await walk(joinPath(dir, entry.name), prefix + entry.name + '/', budget)
+          }
+        }
+        await walk(located.directory, '', { left: 40 })
+        const shown = files.slice(0, MAX_LISTED * 4)
+        base.files = shown
+        base.total = files.length
+        base.more = files.length > shown.length
+        return jsonSafe(base)
+      }
+
+      const relative = String(input.path ?? '').trim()
+      if (relative === '') {
+        base.error = 'pass a path relative to the skill base directory, or list: true to see what is bundled'
+        return jsonSafe(base)
+      }
+      const target = resolvePath(joinPath(located.directory, relative))
+      // Containment check on the resolved path: a skill's own references must not be a way
+      // to read arbitrary files. `../` is rejected before any I/O happens.
+      if (target !== root && !target.startsWith(root.endsWith('/') ? root : root + '/')) {
+        base.path = relative
+        base.error = 'path escapes the skill base directory; skill_ref only reads files bundled with "' + rawName + '"'
+        return jsonSafe(base)
+      }
+      let text
+      try {
+        text = await ctx.fs.readText(await ctx.fs.resolve(target, { signal: exec.signal }), exec.signal)
+      } catch (error) {
+        base.path = relative
+        base.error = 'could not read ' + relative + ' (' + String(error) + '); use list: true to see what is bundled'
+        return jsonSafe(base)
+      }
+      const clamped = clampBody(text, LOAD_CAP)
+      base.path = relative
+      base.content = clamped.text
+      base.bytes = clamped.originalLength
+      base.error = clamped.truncated ? 'file truncated at ' + String(LOAD_CAP) + ' of ' + String(clamped.originalLength) + ' characters' : ''
+      return jsonSafe(base)
+    },
+    presentCall(args) {
+      const input = isRecord(args) ? args : {}
+      const label = String(input.name ?? '') + (input.list === true ? ' (list)' : ' :: ' + String(input.path ?? ''))
+      return { card: 'generic', title: 'Read skill file ' + label, kind: 'read', rawInput: label }
+    },
+  })
+
   register(searchTool.name, searchTool)
   register(loadTool.name, loadTool)
-  return { searchTool, loadTool }
+  register(refTool.name, refTool)
+  return { searchTool, loadTool, refTool }
 }
 
 /** Durable DSH plugin entry: registers both tools on the global tool registry. */

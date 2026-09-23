@@ -91,8 +91,12 @@ $rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -No
 | `repo` | string | 按上游目录名过滤，不分大小写 |
 | `names_only` | boolean | 只返回名字与仓库，不带描述 |
 
-返回 `total`、`shown`、`more`，以及每条命中的 `name`、`repo`、`description`（展示时截断到 220 字符）、
-`copies`、`files`、`path`、`libraryRelative`。
+返回 `total`、`shown`、`more`、`fallback`，以及每条命中的 `name`、`repo`、`description`（展示时截断到 220 字符）、
+`copies`、`matchCount`、`files`、`path`、`libraryRelative`。
+
+当没有任何技能命中**全部**关键词时，搜索会自动降级为部分匹配并置 `fallback: "or"`，
+每条命中带上 `matchCount`（命中几个词 / 共几个词）——**近似命中永远不会被当成真命中呈现**；
+单个关键词的查询不会触发降级。
 
 ### `skill_load`
 
@@ -103,6 +107,26 @@ $rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -No
 | `name` | string | 单个技能名；也可以直接给 `SKILL.md` 的完整路径 |
 | `names` | string | 一次加载多个，用逗号或换行分隔 |
 | `repo` | string | 上游仓库过滤，作用于本次调用的每个名字（见下） |
+
+返回 `requested`、`loaded`、`failed`，以及 `skills[]`：每项含 `name`、`source`、`repo`、`copies`、
+`path`、`resourceDir`、`content`、`referenceFiles`、`truncated`、`error`。工具卡片会把每个技能渲染成
+`<skill_content>` 块并附上它的 base directory，所以 `scripts/`、`references/`、`assets/` 这类相对路径能正确解析。
+
+正文超过 120,000 字符会被截断**并且明确上报**：`truncated: true`，附原始长度与可读取全文的路径。
+
+### `skill_ref`
+
+读取某个技能捆绑的**单个文件**，或列出它捆绑了什么。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `name` | string，必填 | `skill_search` 返回过的技能名 |
+| `path` | string | 相对该技能 base directory 的文件路径，例如 `references/rulesets.md` |
+| `list` | boolean | 列出全部捆绑文件，而不是读取某一个 |
+| `repo` | string | 上游仓库过滤，用于同名多份的情况 |
+
+`skill_load` 返回的 `referenceFiles` 列表通常已足够判断**要不要**读某个文件——这个工具让你只读那一个，
+而不是把整个目录塞进上下文。路径在任何 I/O 之前先做包含性校验，所以 `../` 无法越过技能目录。
 
 返回 `requested`、`loaded`、`failed`，以及 `skills[]`：每项含 `name`、`source`、`repo`、`copies`、
 `path`、`resourceDir`、`content`、`referenceFiles`、`error`。工具卡片会把每个技能渲染成一个

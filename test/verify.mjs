@@ -18,7 +18,10 @@ const check = (label, condition, detail) => {
 const registrations = new Map()
 buildSkillRouterTools(makeFsContext('.'), (toolName, tool) => registrations.set(toolName, tool))
 console.log('plugin:', name, '| inject:', inject.join(','), '| tools:', [...registrations.keys()].join(', '))
-check('registers exactly skill_search and skill_load', registrations.size === 2)
+check('registers exactly skill_search, skill_load and skill_ref', registrations.size === 3, 'got ' + [...registrations.keys()].join(', '))
+for (const expected of ['skill_search', 'skill_load', 'skill_ref']) {
+  check(`${expected} is registered`, registrations.has(expected))
+}
 for (const [toolName, tool] of registrations) {
   check(`${toolName} has a description`, typeof tool.description === 'string' && tool.description.length > 40)
   check(`${toolName} has render + execute`, typeof tool.output?.render === 'function' && typeof tool.execute === 'function')

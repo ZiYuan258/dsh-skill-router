@@ -89,7 +89,9 @@ Find a skill. Keywords are lowercased and **AND**-ed across the skill name, its 
 | `repo` | string | case-insensitive filter on the upstream directory name |
 | `names_only` | boolean | names and repos only, no descriptions |
 
-Returns `total`, `shown`, `more`, and per hit: `name`, `repo`, `description` (truncated to 220 chars for display), `copies`, `files`, `path`, `libraryRelative`.
+Returns `total`, `shown`, `more`, `fallback`, and per hit: `name`, `repo`, `description` (truncated to 220 chars for display), `copies`, `matchCount`, `files`, `path`, `libraryRelative`.
+
+When nothing matches **every** keyword, the search retries with a partial match and sets `fallback: "or"`, labelling each hit with its `matchCount` out of the keyword count — so a near-miss is never presented as a real hit. A single-keyword query never falls back.
 
 ### `skill_load`
 
@@ -101,7 +103,22 @@ Load the full instructions of one or more skills.
 | `names` | string | several names in one call, separated by commas or newlines |
 | `repo` | string | upstream repo filter, applied to every name in the call (see below) |
 
-Returns `requested`, `loaded`, `failed`, and a `skills[]` array of `{ name, source, repo, copies, path, resourceDir, content, referenceFiles, error }`. The tool card renders each skill as a `<skill_content>` block followed by its base directory, so relative paths (`scripts/`, `references/`, `assets/`) resolve correctly.
+Returns `requested`, `loaded`, `failed`, and a `skills[]` array of `{ name, source, repo, copies, path, resourceDir, content, referenceFiles, truncated, error }`. The tool card renders each skill as a `<skill_content>` block followed by its base directory, so relative paths (`scripts/`, `references/`, `assets/`) resolve correctly.
+
+A body over 120 000 characters is clamped **and reported**: `truncated: true` plus the original length and the path to read in full.
+
+### `skill_ref`
+
+Read one file bundled with a skill, or list what is bundled.
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `name` | string, required | a skill name `skill_search` returned |
+| `path` | string | file relative to that skill's base directory, e.g. `references/rulesets.md` |
+| `list` | boolean | list every bundled file instead of reading one |
+| `repo` | string | upstream repo filter, for a name that exists several times |
+
+The `referenceFiles` list from `skill_load` is often all you need to decide *whether* to read a file — this is how you read only that one instead of pulling the whole directory into context. Paths are resolved with a containment check before any I/O, so `../` cannot reach outside the skill directory.
 
 Lookup order: **library first, then the resident catalog** (`ctx.skills`). The `source` field says which one won.
 
