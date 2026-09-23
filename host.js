@@ -251,7 +251,18 @@ function parseIndex(text) {
     // may not be quoted depending on which writer produced the file.
     if (repo === 'repo' && name === 'name') continue
     if (name === '' || relpath === '') continue
-    rows.push({ name, repo, relpath, description: cleanDescription(fields[3]), files: fields[4] ?? '' })
+    rows.push({
+      name,
+      repo,
+      relpath,
+      description: cleanDescription(fields[3]),
+      files: fields[4] ?? '',
+      // Optional 7th column. DSH skills may carry a `whenToUse` frontmatter field, which
+      // upstream libraries usually leave empty (0 of 1025 in the reference library), so
+      // its absence must stay a normal case rather than a parse error. When a writer does
+      // emit it, it is trigger phrasing by definition and is scored as such.
+      whenToUse: cleanDescription(fields[6]),
+    })
   }
   return rows
 }
@@ -502,6 +513,11 @@ export function buildSkillRouterTools(ctx, register) {
           lines.push(
             '- ' + String(hit.name) + '  [' + String(hit.repo) + ']' + (String(hit.description) === '' ? '' : '\n    ' + String(hit.description)),
           )
+          // Surface the trigger phrasing only when it says something the description does
+          // not, so a library that fills both does not pay for the duplication twice.
+          if (String(hit.whenToUse) !== '' && String(hit.whenToUse) !== String(hit.description)) {
+            lines.push('    when: ' + String(hit.whenToUse))
+          }
         }
         if (String(result.error) !== '') lines.push('error: ' + String(result.error))
         return [{ type: 'text', text: lines.join('\n') }]
@@ -532,6 +548,7 @@ export function buildSkillRouterTools(ctx, register) {
       const scoreRow = (row, requireAll) => {
         const nameText = row.name.toLowerCase()
         const descText = row.description.toLowerCase()
+        const whenText = String(row.whenToUse ?? '').toLowerCase()
         const pathText = (row.repo + '/' + row.relpath).toLowerCase()
         let score = 0
         let nameHits = 0
@@ -543,6 +560,9 @@ export function buildSkillRouterTools(ctx, register) {
             nameHits += 1
           }
           if (descText.includes(token)) part += 24
+          // A whenToUse value IS trigger phrasing, so a hit there says more about intent
+          // than a hit in prose does — scored above description, below the name.
+          if (whenText !== '' && whenText.includes(token)) part += 40
           if (pathText.includes(token)) part += 6
           if (part === 0) {
             if (requireAll) return undefined
@@ -587,6 +607,9 @@ export function buildSkillRouterTools(ctx, register) {
           name: entry.row.name,
           repo: entry.row.repo,
           description: descLength === 0 ? '' : truncate(entry.row.description, descLength),
+          // Empty for every skill whose frontmatter has no whenToUse, which is all of them
+          // in most libraries; the field exists so a writer that fills it is rewarded.
+          whenToUse: descLength === 0 ? '' : truncate(String(entry.row.whenToUse ?? ''), descLength),
           files: entry.row.files,
           // Several upstreams (context-eng-kit especially) ship one skill under
           // skills/, plugins/<x>/skills/ and antigravity/skills/. Reporting the

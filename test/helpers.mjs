@@ -90,15 +90,19 @@ export function makeFixture() {
     { repo: 'alpha-skills', relpath: 'skills/alpha-widgets', name: 'alpha-widgets', description: 'Builds alpha widgets. Use when the task mentions alpha widgets.' },
     { repo: 'alpha-skills', relpath: 'plugins/deep/skills/alpha-widgets', name: 'alpha-widgets', description: 'Builds alpha widgets from the plugin layout.' },
     { repo: 'beta-skills', relpath: 'skills/beta-gadgets', name: 'beta-gadgets', description: 'Builds beta gadgets. Use when the task mentions beta gadgets.' },
+    // Carries the optional whenToUse frontmatter field and the optional 7th index column,
+    // so tests can prove trigger phrasing is parsed, scored and surfaced.
+    { repo: 'gamma-skills', relpath: 'skills/gamma-triggers', name: 'gamma-triggers', description: 'Prose that never names the task.', whenToUse: 'ship the frobnicator' },
   ]
   const indexDir = join(root, '.skill-src')
   mkdirSync(indexDir, { recursive: true })
-  const rows = ['"repo"\t"relpath"\t"name"\t"description"\t"files"\t"KB"']
+  const rows = ['"repo"\t"relpath"\t"name"\t"description"\t"files"\t"KB"\t"whenToUse"']
   for (const skill of skills) {
     const dir = join(indexDir, skill.repo, skill.relpath)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n# ${skill.name}\n\nFixture body for ${skill.name}.\n`, 'utf8')
-    rows.push([skill.repo, skill.relpath, skill.name, skill.description, '1', '1'].map((cell) => `"${cell}"`).join('\t'))
+    const when = skill.whenToUse === undefined ? '' : `whenToUse: ${skill.whenToUse}\n`
+    writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${skill.name}\ndescription: ${skill.description}\n${when}---\n\n# ${skill.name}\n\nFixture body for ${skill.name}.\n`, 'utf8')
+    rows.push([skill.repo, skill.relpath, skill.name, skill.description, '1', '1', skill.whenToUse ?? ''].map((cell) => `"${cell}"`).join('\t'))
   }
   // A bundled reference tree, so skill_ref has something real to read: a nested file, a
   // binary file, and a path that climbs out of the skill directory.

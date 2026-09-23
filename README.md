@@ -2,10 +2,10 @@
 
 [English](README.en.md) | 中文
 
-一个 DeepSeek Harness **Host 插件**，新增 `skill_search` 与 `skill_load` 两个工具，让 agent 能从技能库里自己挑技能，而不是为"目录里挂着但用不上"的技能每轮都付 token。
+一个 DeepSeek Harness **Host 插件**，新增 `skill_search`、`skill_load`、`skill_ref` 三个工具，让 agent 能从技能库里自己挑技能，而不是为"目录里挂着但用不上"的技能每轮都付 token。
 
 - **零依赖。** 没有任何 `import`，没有 `node_modules`，不需要安装任何东西。
-- **零目录成本。** 两个工具只是几百字符的 schema；技能库本身从不注入上下文。
+- **零目录成本。** 三个工具只占几百字符的 schema；技能库本身从不注入上下文。
 - **由 agent 选。** 判断规则写在工具描述里，由模型决定用哪些技能——不把选择推给用户。
 
 ## 为什么需要它
@@ -45,7 +45,7 @@ dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-router
 > 若你的工具或脚本报告本仓库"不可访问"，先分清是哪种：GitHub 对**未认证 API** 有 60 次/小时限流，
 > 超限会返回 `403 API rate limit exceeded`，而网页与 raw 文件仍然正常——`dsh plugin add` 走的正是后者。
 
-重启一次 DSH，然后在工具列表里确认 `skill_search` 与 `skill_load` 都在。
+重启一次 DSH，然后在工具列表里确认 `skill_search`、`skill_load`、`skill_ref` 都在。
 
 卸载：
 
@@ -61,8 +61,10 @@ dsh plugin --profile <profile> remove dsh-skill-router
 
 需要一个**技能索引**：`<工作区>/.skill-src/skill-index.tsv`。它是制表符分隔的表，表头为
 `repo`、`relpath`、`name`、`description`、`files`、`KB`，每行指向 `<根目录>/<repo>/<relpath>/SKILL.md`。
+**第 7 列 `whenToUse` 可选**：填了就以高于描述的权重参与检索，不填则读作空字符串（实测参考库里
+1025 个 `SKILL.md` 有 0 个带它，所以"没有"是常态而非缺陷）；6 列索引照常工作。
 
-插件从**会话工作目录往上最多找 8 层**，因此没有任何盘符或路径是写死的。索引不存在时，两个工具会
+插件从**会话工作目录往上最多找 8 层**，因此没有任何盘符或路径是写死的。索引不存在时，三个工具会
 直接说明这一点，并告诉你它们找过哪里。
 
 索引由谁生成都行——只要能产出这几列。下面是一个参考实现（PowerShell，适用于把多个上游仓库

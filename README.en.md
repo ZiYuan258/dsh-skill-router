@@ -2,10 +2,10 @@
 
 English | [中文](README.md)
 
-A DeepSeek Harness **Host plugin** that adds two tools — `skill_search` and `skill_load` — so an agent can pick its own skills from a library instead of paying for every skill on every turn.
+A DeepSeek Harness **Host plugin** that adds three tools — `skill_search`, `skill_load` and `skill_ref` — so an agent can pick its own skills from a library instead of paying for every skill on every turn.
 
 - **Zero dependencies.** No `import` of any kind, no `node_modules`, nothing to install.
-- **Zero catalog cost.** The tools cost a few hundred characters of schema; the library itself is never injected.
+- **Zero catalog cost.** The three tools cost a few hundred characters of schema; the library itself is never injected.
 - **Agent-driven selection.** The routing rules live in the tool descriptions, so the model decides — the user is not asked to pick.
 
 ## Why this exists
@@ -46,7 +46,7 @@ The two are **not competitors and can be stacked** — they work at different la
 > **unauthenticated API** calls to 60/hour and answers `403 API rate limit exceeded`, while the web page and raw
 > files keep working — and `dsh plugin add` uses those.
 
-Restart DSH once. Then check the tool list: `skill_search` and `skill_load` should both be present.
+Restart DSH once. Then check the tool list: `skill_search`, `skill_load` and `skill_ref` should all be present.
 
 Uninstall:
 
@@ -62,9 +62,9 @@ dsh plugin --profile <profile> remove dsh-skill-router
 
 ### What the plugin needs from your setup
 
-A **skill index** describing the library. The plugin reads `<workspace>/.skill-src/skill-index.tsv` — a tab-separated file with the header `repo`, `relpath`, `name`, `description`, `files`, `KB`, where each row points at `<root>/<repo>/<relpath>/SKILL.md`.
+A **skill index** describing the library. The plugin reads `<workspace>/.skill-src/skill-index.tsv` — a tab-separated file with the header `repo`, `relpath`, `name`, `description`, `files`, `KB`, where each row points at `<root>/<repo>/<relpath>/SKILL.md`. **A 7th column, `whenToUse`, is optional**: fill it and it is matched with more weight than the description; leave it out and it reads as an empty string (0 of 1025 `SKILL.md` files in the measured reference library carry it, so absent is the normal case, not a defect). A 6-column index keeps working.
 
-The plugin walks up from the session working directory (up to 8 levels) to find it, so nothing is hard-coded to a drive or path. If the file is missing, both tools report exactly that and tell you which directory they searched.
+The plugin walks up from the session working directory (up to 8 levels) to find it, so nothing is hard-coded to a drive or path. If the file is missing, all three tools report exactly that and tell you which directory they searched.
 
 There is nothing magic about the writer — any script that emits those columns works. A reference generator (PowerShell, for a library of upstream repos checked out under one directory) looks like:
 

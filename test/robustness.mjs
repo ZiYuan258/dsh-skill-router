@@ -48,6 +48,25 @@ check('OR fallback explains itself', String(loose.note).includes('match only som
 const single = await search.execute({ query: 'nonexistentword' }, exec)
 check('a single keyword never reports OR fallback', single.fallback === 'none' && single.hits.length === 0, 'fallback=' + single.fallback)
 
+// --- 1b. the optional whenToUse column ---------------------------------------
+// DSH skills may carry a whenToUse frontmatter field; upstream libraries usually leave it
+// empty (0 of 1025 in the reference library), so both its presence and its absence must work.
+console.log('\nwhenToUse (optional 7th index column):')
+const byTrigger = await search.execute({ query: 'frobnicator' }, exec)
+check('a whenToUse-matched skill is found', byTrigger.hits.some((hit) => hit.name === 'gamma-triggers'), JSON.stringify(byTrigger.hits.map((h) => h.name)))
+const triggerHit = byTrigger.hits.find((hit) => hit.name === 'gamma-triggers')
+check('its trigger phrasing is returned', String(triggerHit?.whenToUse).includes('frobnicator'), JSON.stringify(triggerHit?.whenToUse))
+check('the card shows the trigger line', search.output.render({}, byTrigger)[0].text.includes('when: ship the frobnicator'))
+
+const plainHit = (await search.execute({ query: 'beta gadgets' }, exec)).hits.find((hit) => hit.name === 'beta-gadgets')
+check('a skill without whenToUse still matches', plainHit !== undefined)
+check('and reports it as empty', String(plainHit?.whenToUse) === '', JSON.stringify(plainHit?.whenToUse))
+
+// A column the writer omitted entirely (6-column index) must still parse.
+const noColumn = await search.execute({ query: 'alpha widgets' }, exec)
+check('a 6-column index still parses', noColumn.hits.some((hit) => hit.name === 'alpha-widgets'))
+check('the missing column yields an empty value', noColumn.hits.every((hit) => typeof hit.whenToUse === 'string'))
+
 // --- 2. truncation, including the boundary -----------------------------------
 console.log('\ntruncation:')
 const big = await load.execute({ name: 'gamma-huge' }, exec)
