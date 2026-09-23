@@ -1,5 +1,7 @@
 # dsh-skill-router
 
+English | [中文](README.zh.md)
+
 A DeepSeek Harness **Host plugin** that adds two tools — `skill_search` and `skill_load` — so an agent can pick its own skills from a library instead of paying for every skill on every turn.
 
 - **Zero dependencies.** No `import` of any kind, no `node_modules`, nothing to install.
@@ -115,7 +117,7 @@ Limits: 8 names per call, 120 000 characters per skill body, 8 bundled entries l
 unsupported JSON schema: schema.type must be one of object/array/string/number/integer/boolean/null
 ```
 
-This plugin therefore ships **no `node_modules` and no dependencies**, and builds its tool definitions locally in standard JSON Schema, so they are valid whether or not the runtime compiles schemas. `test/boot-safety.mjs` enforces both rules.
+This plugin therefore ships **no `node_modules` and no dependencies**, and builds its tool definitions locally in standard JSON Schema, so they are valid whether or not the runtime compiles schemas. The registry's compiler is stricter than its assertion in one place: an object schema must state `additionalProperties` explicitly (`{ type: 'object' }` alone is refused). `test/boot-safety.mjs` enforces all of this.
 
 **Duplicate names.** Libraries assembled from several upstream repos often carry the same skill name more than once — one popular repo publishes every skill under `skills/`, `plugins/<name>/skills/` *and* `antigravity/skills/`. `skill_search` reports `copies` so the ambiguity is visible, `skill_load` accepts `repo` to disambiguate, and without a hint it picks deterministically (shallowest path wins). A `repo` filter that matches nothing reports which repos do have the skill instead of silently falling back.
 

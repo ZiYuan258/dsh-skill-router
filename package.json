@@ -14,6 +14,7 @@
     "host.js",
     "cordis.patch.yml",
     "README.md",
+    "README.zh.md",
     "LICENSE"
   ],
   "keywords": [
@@ -38,7 +39,7 @@
     "node": ">=20.18.0"
   },
   "scripts": {
-    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs"
+    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs && node test/docs-parity.mjs"
   },
   "dsh": {
     "engines": {
