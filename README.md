@@ -19,11 +19,11 @@ This plugin closes that gap. Skills you want auto-triggered stay resident; every
 Requires a DSH installation (`dsh >= 0.1.5-rc.1`) and a profile. `dsh plugin` forwards to `pnpm` in the profile directory and reconciles the bundle list.
 
 ```sh
-# from a checkout
-dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-router
-
-# or from git
+# from git (recommended)
 dsh plugin --profile <profile> add github:ZiYuan258/dsh-skill-router
+
+# or from a downloaded release tarball / checkout
+dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-router
 ```
 
 Restart DSH once. Then check the tool list: `skill_search` and `skill_load` should both be present.
@@ -33,6 +33,12 @@ Uninstall:
 ```sh
 dsh plugin --profile <profile> remove dsh-skill-router
 ```
+
+> **No registry publication.** DSH composes a plugin from a package it can resolve, and a
+> GitHub or local install is enough — this package is therefore `private: true`, and
+> `dsh plugin add github:…` is the canonical path. Release tarballs are attached to
+> [GitHub releases](https://github.com/ZiYuan258/dsh-skill-router/releases) for offline or
+> air-gapped installs.
 
 ### What the plugin needs from your setup
 

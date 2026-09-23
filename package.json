@@ -3,6 +3,7 @@
   "version": "1.1.0",
   "description": "DeepSeek Harness Host plugin adding the skill_search / skill_load tools, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "main": "./host.js",
   "exports": {

@@ -40,7 +40,9 @@ for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies',
 }
 if (manifest.main !== './host.js') problems.push('package.json main must point at host.js')
 if (manifest.dsh?.bundle?.patch === undefined) problems.push('package.json must declare dsh.bundle.patch — without it the plugin is never composed')
-if (manifest.private === true) problems.push('package.json is private:true, so it cannot be published or installed from a registry')
+// Distribution is GitHub-only on purpose (a registry publication is not required for a DSH
+// plugin, and `private` stops an accidental `npm publish` from a stray command).
+if (manifest.private !== true) problems.push('package.json should stay private:true — this plugin is distributed from GitHub, not from a registry')
 
 // --- invariant 2: schemas stand on their own ---------------------------------
 const tools = new Map()
