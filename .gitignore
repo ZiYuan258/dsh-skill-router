@@ -4,5 +4,6 @@ node_modules/
 !test/node_modules/@deepseek-ai/dsh-tools/
 !test/node_modules/@deepseek-ai/dsh-tools/**
 *.log
+*.tgz
 .DS_Store
 Thumbs.db
