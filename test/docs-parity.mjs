@@ -62,6 +62,14 @@ checkPair('README', 'README.md', 'README.en.md', [
   'copies',
   'whenToUse',
   'explain',
+  // 定位主张：两份都必须说清"只有大型库才需要它"，以及成本那组实测数字。
+  '~30',
+  '150k',
+  '3,603 B',
+  '1,001',
+  '1,541',
+  'agent/pre-step',
+  'ctx.skills.list()',
 ])
 
 checkPair('SECURITY', 'SECURITY.md', 'SECURITY.zh.md', [
