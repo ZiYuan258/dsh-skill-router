@@ -1,6 +1,8 @@
-# v1.1.0 — first public release
+﻿# v1.1.0 — first public release
 
 A DeepSeek Harness **Host plugin** that adds two tools, `skill_search` and `skill_load`, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.
+
+**Documentation:** [English](https://github.com/ZiYuan258/dsh-skill-router/blob/main/README.md) | [中文](https://github.com/ZiYuan258/dsh-skill-router/blob/main/README.zh.md)
 
 ## Install
 
@@ -23,7 +25,7 @@ No registry publication: DSH composes a plugin from any package it can resolve, 
 | `skill_search` | AND-ed keyword lookup over a staged index (skill name / description / upstream repo), returning names, repos, a duplicate count and absolute `SKILL.md` paths |
 | `skill_load` | Loads one or more skill bodies into context as `<skill_content>` blocks with their base directories, so `scripts/`, `references/` and `assets/` resolve correctly |
 
-The index is `<workspace>/.skill-src/skill-index.tsv` (`repo`, `relpath`, `name`, `description`, `files`, `KB`), located by walking up from the session working directory — nothing is hard-coded to a drive or path. The README documents the columns and includes a reference generator.
+The index is `<workspace>/.skill-src/skill-index.tsv` (`repo`, `relpath`, `name`, `description`, `files`, `KB`), located by walking up from the session working directory — nothing is hard-coded to a drive or path. Both READMEs document the columns and include a reference generator.
 
 ## Highlights
 
@@ -32,6 +34,7 @@ The index is `<workspace>/.skill-src/skill-index.tsv` (`repo`, `relpath`, `name`
 - **Agent-driven selection.** The routing rules live in the tool descriptions, so the model decides which skills to use — the user is not asked to pick.
 - **Robust batch loading.** `skill_load` accepts a real array, a JSON-encoded array, or a comma/newline-separated string, because array arguments can arrive stringified.
 - **Deterministic duplicate handling.** `skill_search` reports `copies`, `skill_load` takes `repo` to disambiguate, and without a hint the shallowest path wins — a `repo` filter matching nothing says which repos do have the skill instead of silently falling back.
+- **Bilingual docs kept in sync** by a test, not by discipline.
 
 ## Two bugs this release fixes, each with a regression test
 
@@ -51,7 +54,7 @@ The second: `skill_load` originally accepted `name` as `oneOf: [string, array]`,
 npm test
 ```
 
-Six dependency-free scripts. They run against a real staged library when one is reachable and otherwise generate a throwaway fixture, so this tarball is self-testing. CI runs them on Node 20, 22 and 24 with no install step.
+Seven dependency-free scripts. They run against a real staged library when one is reachable and otherwise generate a throwaway fixture, so this tarball is self-testing. CI runs them on Node 20, 22 and 24 with no install step.
 
 ## Requirements
 
