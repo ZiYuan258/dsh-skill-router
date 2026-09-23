@@ -119,8 +119,18 @@ Find a skill. Keywords are lowercased and **AND**-ed across the skill name, its 
 | `limit` | integer | 1–40, default 12 |
 | `repo` | string | case-insensitive filter on the upstream directory name |
 | `names_only` | boolean | names and repos only, no descriptions |
+| `explain` | boolean | also return the **score breakdown** per hit — per keyword, per field — for diagnosing why a search found nothing or the wrong thing |
 
-Returns `total`, `shown`, `more`, `fallback`, and per hit: `name`, `repo`, `description` (truncated to 220 chars for display), `copies`, `matchCount`, `files`, `path`, `libraryRelative`.
+Returns `total`, `shown`, `more`, `fallback`, and per hit: `name`, `repo`, `description` (truncated to 220 chars for display), `copies`, `matchCount`, `whenToUse`, `files`, `path`, `libraryRelative`; with `explain` also `score` and `why`.
+
+With `explain: true` each hit names the fields that matched, and a missed keyword is recorded as `-`:
+
+```
+- beta-gadgets  [beta-skills]
+    why: widgets: -; beta: +130 (name+description+path)
+```
+
+Off by default, so the normal path pays nothing for it.
 
 When nothing matches **every** keyword, the search retries with a partial match and sets `fallback: "or"`, labelling each hit with its `matchCount` out of the keyword count — so a near-miss is never presented as a real hit. A single-keyword query never falls back.
 
@@ -175,7 +185,7 @@ This plugin therefore ships **no `node_modules` and no dependencies**, and build
 npm test
 ```
 
-Six dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a throwaway fixture** in the OS temp directory, so a bare clone can test the plugin:
+Eleven dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a throwaway fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -185,6 +195,11 @@ Six dependency-free scripts. They run against a real staged library when one is 
 | `verify.mjs` | end-to-end search + load behaviour |
 | `collisions.mjs` | duplicate-name resolution and `repo` hints |
 | `batch.mjs` | every transport shape for a multi-skill request |
+| `robustness.mjs` | partial-match fallback, `explain`'s score breakdown, `whenToUse`, both truncation boundaries |
+| `skill-ref.mjs` | path containment including `../` traversal attempts, listing, missing files |
+| `index-format.mjs` | the index-format contract: 6- and 7-column files both parse, the header is found by shape, the live index still works |
+| `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
+| `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`.
 
@@ -193,9 +208,23 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`.
 ```
 host.js              the plugin: apply(), buildSkillRouterTools(), definePortableTool()
 cordis.patch.yml     the composed row (id: skill-router, name: dsh-skill-router)
-test/                six runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+SECURITY.md          security policy (English) · SECURITY.zh.md (Chinese, the default language)
+test/                twelve runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+tools/sync-host.mjs  keeps a second host.js checkout in step
+docs/                per-version release notes (bilingual, Chinese first)
 .github/workflows/   CI: npm test on Node 20 / 22 / 24
 ```
+
+## Security
+
+This plugin **never executes code, never touches the network, never writes a file and never reads an
+environment variable** — it performs index lookups and file reads. The skill bodies it reads are
+**untrusted third-party content**, and that is the real trust boundary.
+
+The full policy — threat model, the known limitation of path containment, supply-chain constraints, and the
+list of features that will not be added without review — is in
+[`SECURITY.md`](SECURITY.md) | [中文](SECURITY.zh.md). Report vulnerabilities through this repository's
+private vulnerability reporting.
 
 ## License
 

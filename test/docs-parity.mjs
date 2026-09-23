@@ -1,38 +1,51 @@
-// 两份 README 承载同等权威，所以不能让它们漂移。这个脚本检查中文侧（默认 README.md）
-// 与英文侧（README.en.md）仍然覆盖同一套结构，并且互相链接。
-// 不比较行文——两种语言本来就该读起来不同；只比较读者用来导航的结构与事实。
-import { readFileSync } from 'node:fs'
+// 双语是仓库的约定（中文为默认语言），而约定靠自觉守不住。
+//
+// 检查三组文档对：
+//   1. README.md          ↔ README.en.md
+//   2. SECURITY.md        ↔ SECURITY.zh.md
+//   3. docs/release-notes-v*.md（单文件内双语，中文在前）
+//
+// 只比较读者用来导航的结构与必须逐字一致的事实，不比较行文——两种语言本来就该读起来不同。
+import { readdirSync, readFileSync } from 'node:fs'
 
-const read = (file) => readFileSync(new URL('../' + file, import.meta.url), 'utf8')
-const zh = read('README.md') // 中文是默认语言
-const en = read('README.en.md')
+const root = new URL('../', import.meta.url)
+const read = (file) => readFileSync(new URL(file, root), 'utf8')
 const problems = []
+const hasCjk = (text) => /[\u3400-\u4dbf\u4e00-\u9fff]/.test(text)
 
-// 1. 双向互链，且中文侧的语言切换行必须是第一行内容（中文在前）。
-if (!zh.includes('[English](README.en.md)')) problems.push('README.md does not link to README.en.md')
-if (!en.includes('[中文](README.md)')) problems.push('README.en.md does not link to README.md')
-if (zh.split('\n')[2] !== '[English](README.en.md) | 中文') {
-  problems.push('README.md must open with the language switcher, Chinese first')
-}
-
-// 2. 相同的标题骨架与顺序（标题文字随语言不同）。
-const headings = (text) => [...text.matchAll(/^(#{1,3}) (.+)$/gm)].map((match) => match[1].length)
-const zhHeads = headings(zh)
-const enHeads = headings(en)
-if (zhHeads.length !== enHeads.length) {
-  problems.push(`heading count differs: zh=${zhHeads.length} en=${enHeads.length}`)
-} else if (zhHeads.join() !== enHeads.join()) {
-  problems.push(`heading levels differ: zh=[${zhHeads}] en=[${enHeads}]`)
-}
-
-// 3. 相同数量的代码块与表格行，确保没有实例或参数被漏掉。
+const headings = (text) => [...text.matchAll(/^(#{1,3}) (.+)$/gm)].map((m) => m[1].length)
 const fences = (text) => (text.match(/^```/gm) ?? []).length
-if (fences(zh) !== fences(en)) problems.push(`fenced block markers differ: zh=${fences(zh)} en=${fences(en)}`)
 const tableRows = (text) => (text.match(/^\|/gm) ?? []).length
-if (tableRows(zh) !== tableRows(en)) problems.push(`table rows differ: zh=${tableRows(zh)} en=${tableRows(en)}`)
 
-// 4. 必须在两份里逐字出现的事实：工具名、安装 spec、索引文件名、限额、环境变量、返回字段。
-const shared = [
+/** 两份文件：相同的标题骨架、代码块数、表格行数，以及一组逐字相同的事实。 */
+function checkPair(label, defaultFile, alternateFile, facts) {
+  let a
+  let b
+  try {
+    a = read(defaultFile)
+    b = read(alternateFile)
+  } catch (error) {
+    problems.push(`${label}: cannot read a side (${error.message})`)
+    return
+  }
+
+  const ha = headings(a)
+  const hb = headings(b)
+  if (ha.length !== hb.length) problems.push(`${label}: heading count differs (${ha.length} vs ${hb.length})`)
+  else if (ha.join() !== hb.join()) problems.push(`${label}: heading levels differ ([${ha}] vs [${hb}])`)
+  if (fences(a) !== fences(b)) problems.push(`${label}: fenced blocks differ (${fences(a)} vs ${fences(b)})`)
+  if (tableRows(a) !== tableRows(b)) problems.push(`${label}: table rows differ (${tableRows(a)} vs ${tableRows(b)})`)
+
+  for (const fact of facts) {
+    if (!a.includes(fact)) problems.push(`${label}: ${defaultFile} is missing ${JSON.stringify(fact)}`)
+    if (!b.includes(fact)) problems.push(`${label}: ${alternateFile} is missing ${JSON.stringify(fact)}`)
+  }
+
+  console.log(`  ${label}: ${ha.length} headings, ${fences(a) / 2} fenced blocks, ${tableRows(a)} table rows`)
+}
+
+console.log('bilingual pairs:')
+checkPair('README', 'README.md', 'README.en.md', [
   'skill_search',
   'skill_load',
   'skill_ref',
@@ -47,13 +60,55 @@ const shared = [
   'matchCount',
   'truncated',
   'copies',
-]
-for (const fact of shared) {
-  if (!zh.includes(fact)) problems.push(`README.md is missing ${JSON.stringify(fact)}`)
-  if (!en.includes(fact)) problems.push(`README.en.md is missing ${JSON.stringify(fact)}`)
+  'whenToUse',
+  'explain',
+])
+
+checkPair('SECURITY', 'SECURITY.md', 'SECURITY.zh.md', [
+  'eval',
+  'ctx.fs',
+  'resolvePath',
+  'skill-ref.mjs',
+  'boot-safety.mjs',
+  '@deepseek-ai/*',
+  'private: true',
+  'curl',
+  'rm -rf',
+  '1025',
+])
+
+// 默认语言是中文：切换行必须是第一行内容，且链到对面。
+if (!read('README.md').includes('[English](README.en.md)')) problems.push('README.md does not link to README.en.md')
+if (!read('README.en.md').includes('[中文](README.md)')) problems.push('README.en.md does not link to README.md')
+if (read('README.md').split('\n')[2] !== '[English](README.en.md) | 中文') {
+  problems.push('README.md must open with the language switcher, Chinese first')
 }
 
-console.log(`README.md (zh): ${zh.split('\n').length} lines, ${zhHeads.length} headings, ${fences(zh) / 2} fenced blocks, ${tableRows(zh)} table rows`)
-console.log(`README.en.md:   ${en.split('\n').length} lines, ${enHeads.length} headings, ${fences(en) / 2} fenced blocks, ${tableRows(en)} table rows`)
+// 安全政策的中文侧是第一语言：中文标题、中文在前的切换行。
+const zhSecurity = read('SECURITY.zh.md')
+if (!hasCjk(zhSecurity.split('\n')[0])) problems.push('SECURITY.zh.md: the title must be Chinese')
+if (zhSecurity.split('\n')[2] !== '[English](SECURITY.md) | 中文') {
+  problems.push('SECURITY.zh.md: line 3 must be the switcher "[English](SECURITY.md) | 中文"')
+}
+if (!read('SECURITY.md').split('\n')[2].includes('SECURITY.zh.md')) {
+  problems.push('SECURITY.md: the switcher on line 3 must link to SECURITY.zh.md')
+}
+
+// --- 发布说明：单文件双语，中文在前 -----------------------------------------
+const notes = readdirSync(new URL('docs/', root)).filter((n) => /^release-notes-v.+\.md$/.test(n)).sort()
+console.log('  release notes: ' + notes.length)
+for (const name of notes) {
+  const lines = read('docs/' + name).split('\n')
+  const englishAt = lines.findIndex((line) => line.trim() === '## English')
+  if (!hasCjk(lines[0])) problems.push(`${name}: the heading must be Chinese`)
+  if (lines[2] !== '[English](#english) | 中文') problems.push(`${name}: line 3 must be the Chinese-first switcher`)
+  if (englishAt < 0) problems.push(`${name}: no "## English" section`)
+  else {
+    if (englishAt < lines.length / 3) problems.push(`${name}: the English section starts too early`)
+    if (lines.slice(englishAt).join('\n').trim().length < 200) problems.push(`${name}: the English section looks empty`)
+    if (lines.slice(0, englishAt).join('\n').trim().length < 200) problems.push(`${name}: the Chinese section looks empty`)
+  }
+}
+
 console.log(problems.length === 0 ? 'docs parity: OK' : 'docs parity FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

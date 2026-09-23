@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-router",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "DeepSeek Harness Host plugin adding the skill_search / skill_load tools, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
   "license": "MIT",
   "private": true,
@@ -15,6 +15,8 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "SECURITY.md",
+    "SECURITY.zh.md",
     "LICENSE",
     "tools"
   ],
@@ -40,7 +42,7 @@
     "node": ">=20.18.0"
   },
   "scripts": {
-    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs && node test/robustness.mjs && node test/skill-ref.mjs && node test/index-format.mjs && node test/minimal-host.mjs && node test/docs-parity.mjs && node test/release-notes.mjs",
+    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs && node test/robustness.mjs && node test/skill-ref.mjs && node test/index-format.mjs && node test/minimal-host.mjs && node test/docs-parity.mjs",
     "sync:host": "node tools/sync-host.mjs",
     "check:host": "node tools/sync-host.mjs --check"
   },

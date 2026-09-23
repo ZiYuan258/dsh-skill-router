@@ -122,9 +122,19 @@ $rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -No
 | `limit` | integer | 1–40，默认 12 |
 | `repo` | string | 按上游目录名过滤，不分大小写 |
 | `names_only` | boolean | 只返回名字与仓库，不带描述 |
+| `explain` | boolean | 额外返回每条命中的**分数构成**（逐关键词、逐字段），用于诊断"为什么搜不到 / 搜错了" |
 
 返回 `total`、`shown`、`more`、`fallback`，以及每条命中的 `name`、`repo`、`description`（展示时截断到 220 字符）、
-`copies`、`matchCount`、`files`、`path`、`libraryRelative`。
+`copies`、`matchCount`、`whenToUse`、`files`、`path`、`libraryRelative`；开了 `explain` 时另有 `score` 与 `why`。
+
+`explain: true` 时会看到命中的字段来源，未命中的关键词记为 `-`：
+
+```
+- beta-gadgets  [beta-skills]
+    why: widgets: -; beta: +130 (name+description+path)
+```
+
+默认关闭，所以正常路径不为它付任何成本。
 
 当没有任何技能命中**全部**关键词时，搜索会自动降级为部分匹配并置 `fallback: "or"`，
 每条命中带上 `matchCount`（命中几个词 / 共几个词）——**近似命中永远不会被当成真命中呈现**；
@@ -198,7 +208,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-六个零依赖脚本。当机器上能找到一个真实的技能库时就直接对真库跑，否则**在系统临时目录生成一个
+十一个零依赖脚本。当机器上能找到一个真实的技能库时就直接对真库跑，否则**在系统临时目录生成一个
 一次性夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
@@ -209,6 +219,11 @@ npm test
 | `verify.mjs` | 搜索 + 加载的端到端行为 |
 | `collisions.mjs` | 重名解析与 `repo` 提示 |
 | `batch.mjs` | 多技能请求的每一种传输形态 |
+| `robustness.mjs` | 部分匹配降级、`explain` 的分数构成、`whenToUse`、两种截断边界 |
+| `skill-ref.mjs` | 路径包含性（含 `../` 越界尝试）、列目录、文件缺失 |
+| `index-format.mjs` | 索引格式契约：6 列与 7 列都可解析、表头按形状识别、真库仍可用 |
+| `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
+| `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 可以指定要测的技能库。
 
@@ -217,10 +232,21 @@ npm test
 ```
 host.js              插件本体：apply()、buildSkillRouterTools()、definePortableTool()
 cordis.patch.yml     被组合进去的那一行（id: skill-router, name: dsh-skill-router）
-test/                六个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
-docs/                各版本的发布说明
+SECURITY.md          安全政策（英文）· SECURITY.zh.md（中文，第一语言）
+test/                十二个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+tools/sync-host.mjs  host.js 双份副本的同步工具
+docs/                各版本的发布说明（双语，中文在前）
 .github/workflows/   CI：Node 20 / 22 / 24 上跑 npm test
 ```
+
+## 安全
+
+这个插件**从不执行代码、从不联网、从不写文件、从不读环境变量**——只做索引查询与文件读取。
+它读到的技能正文是**不可信第三方内容**，那才是信任边界。
+
+完整政策（威胁模型、路径包含性的已知局限、供应链约束、以及"未经审阅不会加入的功能"清单）见
+[`SECURITY.zh.md`](SECURITY.zh.md) ｜ [English](SECURITY.md)。
+漏洞请走本仓库的 GitHub 私密漏洞报告。
 
 ## 许可
 
