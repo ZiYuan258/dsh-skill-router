@@ -28,6 +28,23 @@ dsh plugin --profile <profile> add github:ZiYuan258/dsh-skill-router
 dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-router
 ```
 
+### ⚠️ 名字先认准：`dsh-skill-router` 有多个同名仓库
+
+这个名字下至少并存 8 个仓库，**装错就是装了另一个插件**。认准两件事：
+
+| | 本仓库 | 另一类同名插件（例：`MJorgin/dsh-skill-router`） |
+|---|---|---|
+| 安装命令 | `github:ZiYuan258/dsh-skill-router` | `github:akqwpeter-prog/dsh-skill-router`（该仓库已改名，命令是过期的） |
+| 作者 | ZiYuan258 | 其他 |
+| 机制 | **工具驱动**：模型自己调 `skill_search` / `skill_load` / `skill_ref` | **pre-step 自动路由**：在模型回答前读用户消息，命中即注入技能全文 |
+| 解决的问题 | 库里的技能**对模型不可见** | 模型**该用技能时没用**（注意力漏掉） |
+| 依赖 | 零依赖、零导入 | 各自不同，有的需要 LLM 判定或 embedding |
+
+两者**不冲突、可叠加**——它们在不同的层次上工作。装之前请核对安装命令里的 owner 是 `ZiYuan258`。
+
+> 若你的工具或脚本报告本仓库"不可访问"，先分清是哪种：GitHub 对**未认证 API** 有 60 次/小时限流，
+> 超限会返回 `403 API rate limit exceeded`，而网页与 raw 文件仍然正常——`dsh plugin add` 走的正是后者。
+
 重启一次 DSH，然后在工具列表里确认 `skill_search` 与 `skill_load` 都在。
 
 卸载：

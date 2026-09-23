@@ -28,6 +28,24 @@ dsh plugin --profile <profile> add github:ZiYuan258/dsh-skill-router
 dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-router
 ```
 
+### ⚠️ Check the name first: several repositories share it
+
+At least eight repositories are called `dsh-skill-router`, so installing the wrong one gets you a different plugin. Two things identify this one:
+
+| | This repository | The other family (e.g. `MJorgin/dsh-skill-router`) |
+|---|---|---|
+| Install command | `github:ZiYuan258/dsh-skill-router` | `github:akqwpeter-prog/dsh-skill-router` (that repo was renamed; the command is stale) |
+| Author | ZiYuan258 | someone else |
+| Mechanism | **tool-driven**: the model calls `skill_search` / `skill_load` / `skill_ref` | **pre-step routing**: reads each user message before the model answers and pours matched skills in |
+| Problem it solves | library skills are **invisible to the model** | the model **does not use a skill it should have** |
+| Dependencies | zero dependencies, zero imports | varies; some need an LLM judge or embeddings |
+
+The two are **not competitors and can be stacked** — they work at different layers. Before installing, check that the owner in the command is `ZiYuan258`.
+
+> If a tool or script reports this repository as unreachable, check which kind of failure it is: GitHub rate-limits
+> **unauthenticated API** calls to 60/hour and answers `403 API rate limit exceeded`, while the web page and raw
+> files keep working — and `dsh plugin add` uses those.
+
 Restart DSH once. Then check the tool list: `skill_search` and `skill_load` should both be present.
 
 Uninstall:
