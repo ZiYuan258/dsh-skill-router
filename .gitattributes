@@ -1,0 +1,5 @@
+# Keep the repository LF-only regardless of the contributor's platform: every committed
+# file here is text, and Windows checkouts otherwise rewrite line endings on every commit.
+* text=auto eol=lf
+*.png binary
+*.ico binary

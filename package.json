@@ -1,0 +1,50 @@
+{
+  "name": "dsh-skill-router",
+  "version": "1.1.0",
+  "description": "DeepSeek Harness Host plugin adding the skill_search / skill_load tools, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./host.js",
+  "exports": {
+    ".": "./host.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "host.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "skill",
+    "skills",
+    "router",
+    "agent",
+    "cordis"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZiYuan258/dsh-skill-router.git"
+  },
+  "homepage": "https://github.com/ZiYuan258/dsh-skill-router#readme",
+  "bugs": {
+    "url": "https://github.com/ZiYuan258/dsh-skill-router/issues"
+  },
+  "engines": {
+    "node": ">=20.18.0"
+  },
+  "scripts": {
+    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.5-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

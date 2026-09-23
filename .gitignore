@@ -1,0 +1,8 @@
+node_modules/
+!test/node_modules/
+!test/node_modules/@deepseek-ai/
+!test/node_modules/@deepseek-ai/dsh-tools/
+!test/node_modules/@deepseek-ai/dsh-tools/**
+*.log
+.DS_Store
+Thumbs.db

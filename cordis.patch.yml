@@ -1,0 +1,7 @@
+# DeepSeek Harness Host row for the skill library router.
+#
+# The row name is the package identity, resolved from the profile that composed
+# this patch, so no path is concatenated onto baseUrl here.
+- insert:
+    - id: skill-router
+      name: dsh-skill-router
