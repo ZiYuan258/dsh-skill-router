@@ -338,20 +338,55 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 
 ```
 技能调用清单
-共 5 次技能调用，涉及 3 个技能。
+本会话共 17 次技能调用，涉及 10 个技能。其中 1 次调用一次点名了多个技能，故按技能名分行列出；
 
-1  验证·前置·完成     skill_load   第 12 轮
-2  写作·规划           skill        第 12 轮
-3  供应链·风险审计     skill_load   第 31 轮
+1   cordis·插件·开发 (cordis-plugin-development)   skill        第 1 轮
+2   editing-cordis-compositions                     skill        第 1 轮
+3   remotion·创建 (remotion-create)                 skill_load   第 1 轮
+…
+16  验证·前置·完成 (verification-before-completion)  skill_load   第 63 轮
+17  系统化·调试 (systematic-debugging)              skill_load   第 67 轮
+18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
+
+已读到本会话最早一条记录，上面的数字是完整的。
+dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
-**零模型 token。** 数据全部来自**会话账本**：标签页注册时声明 `inject: (sessionId) => ({ source })`，`conversation.view` 是会话作用域插槽，渲染器会把该会话的 `eventSource` 展开到组件 props 上——`trajectory`、`chat`、`goal` 三个官方标签页都这样拿会话。**没有宿主 RPC、没有投影键、没有网络请求**，也没有任何东西进入模型上下文——插件至今仍然是"从不联网、从不写文件"。
+**零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
 
-> **为什么不是 `useChat().legacy.nodes`。** 那正是上一版的做法，而它是**错的**：实测同一时刻 `legacy.nodes` 有 210 个节点、**0 次工具调用**，而账本里有 2778+ 条事件、技能调用就在其中。`legacy.nodes` 是给 UI 看的**截断投影**，不是会话历史。座位本身没问题——插槽目录里 `conversation.view` 的 `standardProps` 明确列着 `useChat: UseChat`——是**那个投影里没有这些数据**。更早的两版也各错一次（猜节点形状；把请求头里本轮的**工具声明**当成加载）。三次都不是崩溃型错误，UI 都画得出来——所以数据契约必须实测，不能推断。
+```js
+// 注册项。`conversation.view` 声明为 scope: "session"，渲染器用作用域绑定的 key 调用 inject，
+// 再把返回值展开到组件 props 上。（这也是「跟着会话切换」的机制：注入结果按作用域缓存。）
+inject: (sessionId, binding) => {
+  const b = ctx.get('sessions').binding(sessionId ?? binding?.key)
+  return { source: b.eventSource, session: b.session }
+}
+```
 
-**三态完整性，不谎报数字。** 账本窗口是**有上限**的（实测约 1664–1900 条，见过 3336 → 1664 回落），而且 `hasMore` 在**最新那一页上是 true**：第 0 页是历史的近端，几页之前加载的技能在翻到那里之前根本看不见。所以只有把更早的记录读完（`hasMore === false`）才打印 `共 N 次调用，涉及 M 个技能`；之前显示"已加载 N 个技能名，更早的记录尚未读完"；读不到账本时**只说这一件事**，一个计数都不打印。一次调用点名多个技能时，显示行按 `callId + 规范化技能名` 去重，调用数按 `callId` 去重——同一 `callId` 会在之后每个快照里重新出现，用别的键就会把一次加载数成很多次。
+| 你可能会以为 | 实际契约 |
+|---|---|
+| `eventSource` 上能翻页 | ❌ `SessionEventSource = ObservableSnapshot<SessionEventWindow>`，**只有 `getSnapshot()` 与 `subscribe()`** |
+| 那怎么读更早的 | ✅ `loadOlder(): Promise<void>` 在 **`session`** 上（`SessionFace extends ISession`），官方 trajectory 标签页也是这么调的 |
+| 订阅靠 `unsubscribe()` 取消 | ❌ 没有这个方法；取消是 **`subscribe(fn)` 的返回值** |
+| `turn` / `callId` 从哪来 | ✅ `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }`（实测，不是推断） |
 
-**翻页的判据是窗口，不是 promise。** 真实的 `session.loadOlder()` 会在几种情况下**静默什么都不做**（会话还没打开、`events` 还没到、已有并发请求），返回的是一个已 resolve 的 promise。所以"promise resolve 了"不等于"读到了一页"：插件比对请求前后**窗口长度有没有变长**，变长才算读到；没变则重试一次（会话可能还在打开），连续无进展才停下，并说明是三种停止原因中的哪一种（无回应 / 有回应但没进展 / 到页数上限）。这一段是照抄官方 trajectory 标签页的做法。停止翻页**不影响实时尾部**——账本之后出现的调用照样显示。
+**读全历史，且只说真话。** 账本窗口有上限（实测约 1664–1900 条，见过 3336 → 1664 回落），`hasMore` 在最新一页上为真，所以第 0 页是历史的**近端**——几页之前加载的技能在翻到那里之前根本看不见。标签页会一路回填到会话最早一条（实测 43 页），并且：
+
+- **只有读到最早一条**才打印 `本会话共 N 次技能调用…`；之前显示"已加载 N 个技能名（…），更早的记录尚未读完"；
+- **读不到账本时只说这一件事**，一个计数都不打印（服务不在 / 没有绑定 / 没有 eventSource 三种情形各有各的话）；
+- 停止翻页有三种原因，**分开说**：没有回应（4 秒截止时间）、有回应但窗口没动、到 200 页上限——"我放弃了后面的历史"和"历史到此为止"是两件事。
+
+**行数与调用数为什么会不一样。** 这是**正确**的，不是重复计数：
+
+- 去重键是 `callId + 规范化技能名`，所以**一次调用点名多个技能会分成多行**（真机上就有一次 `skill_load` 同时加载了 `code-review-and-quality` 与 `gh-cli`）；
+- **调用数从最终行派生**，不并行累加——同一个事实两个来源就会漂移，而这一条正是真机上先出现"18 行 / 17 次"才被迫改正的；
+- 两者不等时表头会自己说明原因，不需要你对着数字发愣。
+
+**顺序是会话顺序，不是读到的顺序。** 事件以"最新在前"到达，更早的页是**前插**的，所以按读到的先后排会得到**倒序**（真机报告过第 31 轮排在第 5 轮前面）。现在按事件自己的 `seq` 升序，页以什么顺序到达都无所谓。
+
+**翻页的判据是窗口，不是 promise。** 真实的 `session.loadOlder()` 会在几种情况下**静默什么都不做**（会话还没打开、`events` 还没到、已有并发请求），返回一个已 resolve 的 promise。所以"promise resolve 了"不等于"读到了一页"：插件比对请求前后**窗口长度有没有变长**。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
+
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -361,7 +396,8 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 
 翻译是**术语表 + 专名白名单**，不是 872 条整名对照表：短语优先（`best-practices` → 最佳实践），再退到单词（`troubleshooting` → 故障排查），虚词（`and`/`from`/`the`）直接丢弃。
 
-> **事件形状是实测的。** `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }`——真实的一次技能调用在 `seq=6228` 被找到，`entries`/`revision` 在会话进行中被看着增长，2778 次订阅回调里有 1447 次是 `assistant/live-chunk` 流式碎片（所以订阅按 400 ms **节流**，不是逐片渲染）。`test/usage-ledger.mjs` 的夹具照抄这个形状，`test/usage-tab.mjs` 通过**浏览器装载客户端半的同一条路径**取到组件并真的渲染它。
+> **这一栏曾经是空的，原因值得留着。** 它先后读错过四次数据源：猜的节点形状、请求头里本轮的**工具声明**（把"给模型看过"当成"被加载过"）、`useChat().legacy.nodes`（实测同一时刻 210 个节点、**0 次工具调用**，而账本里有 2778+ 条事件），以及对着 `source.loadOlder` 写翻页（方法在 `session` 上，于是守卫每次都在第一行返回，**四次"修复"全都改在一条从未执行的代码路径上**）。四次都不崩溃、UI 都画得出来——所以数据契约必须实测，不能推断。复盘见 `docs/release-notes-v1.8.0.md`。
+
 
 ## 工程约束
 
@@ -398,9 +434,9 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
-| `usage-ledger.mjs` | 技能账本的纯逻辑，夹具照抄实测事件形状：三种加载工具都算、`skill_search` 不算、同一 `callId` 跨页只计一次、一次调用带 `A+B` 两个名字都保留、路径与裸名归并为同一技能、`hasMore` 三态、**窗口挤出后已读到的记录不丢**、坏输入返回空账本而不抛 |
-| `usage-tab.mjs` | 标签页接线，通过**浏览器装载它的同一条路径**取组件再渲染：注册契约、`inject` 声明、两种"读不到账本"的说明、首屏即读且每页只拉一次、`hasMore` 永为真时在上限内停住、第 5 页深埋的调用被找到、200 片流式碎片只排一次渲染、**窗口挤掉最老一条后它仍在清单里** |
-| `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**扫描并拒绝**已证伪的数据契约（`legacy.nodes`、`useChat`、把工具声明当用量）重新出现在代码里 |
+| `usage-ledger.mjs` | 技能账本的纯逻辑（58 条断言），夹具照抄实测事件形状：三种加载工具都算、`skill_search` 不算、同一 `callId` 跨页只计一次、一次调用带 `A+B` 两个名字都保留、路径与裸名归并为同一技能、`hasMore` 三态、**窗口挤出后已读到的记录不丢**、**按 `seq` 排成会话顺序**、**行数与调用数的关系在结构上成立**（`calls ≤ rows`，取等当且仅当没有多名调用）、坏输入返回空账本而不抛 |
+| `usage-tab.mjs` | 标签页接线（82 条断言），通过**浏览器装载它的同一条路径**取组件再渲染：注册契约、`inject` 两个参数、三种"读不到账本"的说明、首屏即读且每页只拉一次、`hasMore` 永为真时在上限内停住、第 5 页深埋的调用被找到、200 片流式碎片只排一次渲染、**窗口挤掉最老一条后它仍在清单里**、**父组件重渲染不得让翻页卡死**、**「读取中」必须有截止时间**、**「行数 ≠ 调用数」必须自我解释**、界面只留结论不留开发用诊断 |
+| `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**扫描并拒绝**已证伪的数据契约回来（`legacy.nodes`、`useChat`、把工具声明当用量、**对着 `source.loadOlder` 而不是 `session.loadOlder` 写翻页**） |
 | `package-contract.mjs` | 加载器会读的每一样东西：`exports`/`main`/`dsh.client`/`dsh.bundle`/`files`、客户端半作为**经典脚本**可编译且自带 `load()` 注册、`host.js` 的导出形状、组合行 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |

@@ -332,20 +332,56 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 
 ```
 技能调用清单
-共 5 次技能调用，涉及 3 个技能。
+本会话共 17 次技能调用，涉及 10 个技能。其中 1 次调用一次点名了多个技能，故按技能名分行列出；
 
-1  验证·前置·完成     skill_load   第 12 轮
-2  写作·规划           skill        第 12 轮
-3  供应链·风险审计     skill_load   第 31 轮
+1   cordis·插件·开发 (cordis-plugin-development)   skill        第 1 轮
+2   editing-cordis-compositions                     skill        第 1 轮
+3   remotion·创建 (remotion-create)                 skill_load   第 1 轮
+…
+16  验证·前置·完成 (verification-before-completion)  skill_load   第 63 轮
+17  系统化·调试 (systematic-debugging)              skill_load   第 67 轮
+18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
+
+已读到本会话最早一条记录，上面的数字是完整的。
+dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
-**Zero model tokens.** The data comes entirely from the **session ledger**: the tab's registration declares `inject: (sessionId) => ({ source })`, and because `conversation.view` is a session-scoped slot the renderer spreads that session's `eventSource` over the component's props — which is how the shipped `trajectory`, `chat` and `goal` tabs reach their session too. There is **no Host RPC, no projection key and no network request**, and nothing enters the model's context — the plugin still never touches the network and never writes a file.
+**Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
 
-> **Why not `useChat().legacy.nodes`.** That was the previous version, and it was **wrong**: measured at one instant, `legacy.nodes` held 210 nodes with **zero tool calls**, while the ledger held 2,778+ events with the skill calls in it. `legacy.nodes` is a truncated UI projection, not the session history. The seat itself is fine — the live slot catalog lists `useChat: UseChat` among the standard props of `conversation.view` — the projection simply does not carry that data. Two versions before that were wrong differently (a guessed node shape; per-turn tool **declarations** read from request headers and counted as usage). None of the three crashed — all three rendered a plausible list — which is exactly why the data contract had to be measured rather than inferred.
+```js
+// The registration. `conversation.view` is declared scope: "session", so the renderer calls inject
+// with the scope binding's key and spreads the result over the component's props. (That is also the
+// mechanism behind following a session switch: injected props are cached per scope.)
+inject: (sessionId, binding) => {
+  const b = ctx.get('sessions').binding(sessionId ?? binding?.key)
+  return { source: b.eventSource, session: b.session }
+}
+```
 
-**Three-state completeness, no invented numbers.** The ledger window is **bounded** (observed ~1,664–1,900, seen resetting 3,336 → 1,664), and `hasMore` is **true on the newest page**: page 0 is the recent end, so a skill loaded five pages back is invisible until paging reaches it. `共 N 次调用，涉及 M 个技能` is therefore printed only once the older records are exhausted (`hasMore === false`); until then the tab says how many names it has read and that older records remain; and with no ledger to read it says **only that**, printing no count at all. When one call names several skills, rows dedupe on `callId + normalized name` while calls dedupe on `callId` alone — the same `callId` is re-delivered on every later snapshot, and any other key counts one load many times.
+| You might assume | The actual contract |
+|---|---|
+| `eventSource` can page | ❌ `SessionEventSource = ObservableSnapshot<SessionEventWindow>` — **only `getSnapshot()` and `subscribe()`** |
+| Then how is older history read | ✅ `loadOlder(): Promise<void>` is on the **`session`** (`SessionFace extends ISession`), which is also how the shipped trajectory tab calls it |
+| Subscriptions are cancelled with `unsubscribe()` | ❌ No such method; cancelling is the **return value of `subscribe(fn)`** |
+| Where `turn` / `callId` come from | ✅ `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }` (measured, not inferred) |
 
-**Paging is judged by the window, never by the promise.** The real `session.loadOlder()` **silently does nothing** in several conditions (a session still opening, `events` not yet arrived, a concurrent read) and returns an already-resolved promise, so "resolved" does not mean "a page arrived". The tab compares the **window's length** before and after: growth is the only thing that counts as a page; no growth is retried once (the session may simply still be opening), and a run of no-ops stops the paging and says which of the three reasons it was — no answer, an answer that moved nothing, or the page cap. This mirrors what the shipped trajectory tab does. Stopping the paging does **not** stop the live tail — calls arriving later still show up.
+**It reads the whole history, and says only what it knows.** The ledger window is **bounded** (observed ~1,664–1,900, seen resetting 3,336 → 1,664) and `hasMore` is **true on the newest page**, so page 0 is the recent end — a skill loaded five pages back is invisible until paging reaches it. The tab backfills to the oldest record in the session (43 pages in practice), and:
+
+- `本会话共 N 次技能调用…` is printed **only once** the oldest record has been reached; until then it says how many names it has read and that older records remain;
+- with **no ledger to read it says only that** and prints no count at all (missing service / no binding / no eventSource are three different sentences);
+- paging can stop for three reasons and **they are stated separately** — no answer (a 4-second deadline), an answer that moved nothing, or the 200-page cap. "I gave up on the rest of the history" and "the history ended here" are different claims.
+
+**Why the row count and the call count can differ.** This is **correct**, not double counting:
+
+- rows dedupe on `callId + normalized name`, so **one call naming several skills becomes several rows** (in practice a single `skill_load` loaded both `code-review-and-quality` and `gh-cli`);
+- **the call count is derived from the final rows**, never accumulated alongside them — two sources for one fact drift, and that is exactly what a live report's "18 rows / 17 calls" forced into the open;
+- when the two differ, the header explains why, so nobody has to stare at the numbers.
+
+**The order is the session's, not the arrival's.** Events arrive newest-first and older pages are **prepended**, so ordering by arrival gives you the reverse (a live report had turn 31 above turn 5). Records are sorted ascending by the event's own `seq`, whatever order the pages happen to arrive in.
+
+**Paging is judged by the window, never by the promise.** The real `session.loadOlder()` **silently does nothing** in several conditions (a session still opening, `events` not yet arrived, a concurrent read) and returns an already-resolved promise, so "resolved" does not mean "a page arrived". The tab compares the **window's length** before and after. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
+
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -355,7 +391,8 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 
 The translation is a **glossary plus a proper-noun allow list**, not 872 hand-written pairs: phrases first (`best-practices` → 最佳实践), then single words (`troubleshooting` → 故障排查), with filler words (`and`, `from`, `the`) dropped.
 
-> **The event shape is measured, not inferred.** `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }` — a real skill call was found at `seq=6228`, `entries`/`revision` were watched growing during a session, and 1,447 of 2,778 observed subscription callbacks were `assistant/live-chunk` streaming fragments (hence a 400 ms **throttle** rather than a render per fragment). `test/usage-ledger.mjs` copies that shape into its fixtures, and `test/usage-tab.mjs` takes the component through the **same load path the browser uses** and actually renders it.
+> **This tab used to be empty, and the reason is worth keeping.** It read the wrong source four times: a guessed node shape; per-turn tool **declarations** from request headers (counting skills merely *offered* to the model as loaded); `useChat().legacy.nodes` (measured at one instant: 210 nodes with **zero tool calls**, against a ledger holding 2,778+ events); and paging written against `source.loadOlder`, which lives on the `session` — so the guard returned on the first line every time and **four "fixes" changed a code path that never executed**. None of the four crashed and all four rendered a plausible list, which is exactly why the data contract had to be measured rather than inferred. The retrospective is in `docs/release-notes-v1.8.0.md`.
+
 
 ## Engineering constraints
 
@@ -392,9 +429,9 @@ Twenty dependency-free scripts. They run against a real staged library when one 
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
-| `usage-ledger.mjs` | the ledger's pure logic, with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one `callId` counts once across pages, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, and malformed input returns an empty ledger instead of throwing |
-| `usage-tab.mjs` | the tab's wiring, taking the component through the **same load path the browser uses** and rendering it: the registration contract, the `inject` declarations, both "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, and **the oldest record staying listed after the window evicts it** |
-| `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declarations, and proves `apply()` survives four document timings; it also **scans for and rejects** the falsified data contracts (`legacy.nodes`, `useChat`, counting tool declarations as usage) returning to the code |
+| `usage-ledger.mjs` | the ledger's pure logic (58 assertions), with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one `callId` counts once across pages, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, **ordering follows `seq` (the session's order, not the arrival's)**, **the row/call relationship holds structurally** (`calls ≤ rows`, equality exactly when no call named several skills), and malformed input returns an empty ledger instead of throwing |
+| `usage-tab.mjs` | the tab's wiring (82 assertions), taking the component through the **same load path the browser uses** and rendering it: the registration contract, both `inject` arguments, three "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, **the oldest record staying listed after the window evicts it**, **a parent re-render never stalling the paging**, **"reading" expiring on a deadline**, **a row/call difference explaining itself**, and no developer diagnostics left in the UI |
+| `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declarations, and proves `apply()` survives four document timings; it also **scans for and rejects** the falsified data contracts returning (`legacy.nodes`, `useChat`, counting tool declarations as usage, **paging against `source.loadOlder` instead of `session.loadOlder`**) |
 | `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
