@@ -8,7 +8,7 @@
 //
 // 第 3 步是关键：只做静态检查的话，一个把字段名写错的组件照样通过。
 import { readFileSync } from 'node:fs'
-import { createContext, runInContext } from 'node:vm'
+import { createContext, Script } from 'node:vm'
 import { fileURLToPath } from 'node:url'
 
 const problems = []
@@ -20,10 +20,17 @@ const check = (label, ok, detail) => {
 const source = readFileSync(fileURLToPath(new URL('../client.js', import.meta.url)), 'utf8')
 
 // --- 1. the file must be loadable in a browser, so: no imports, no Node builtins -------
-check('no import/require of any package', /^\s*(import|const\s+\w+\s*=\s*require\()/m.test(source) === false)
-check('no @deepseek-ai/* reference', source.includes('@deepseek-ai/') === false)
-check('no node: builtin reference', /node:[a-z/]+/.test(source) === false)
-check('no fs / process / Buffer use', /\b(require|process\.|Buffer\.)\b/.test(source) === false)
+//
+// These scan CODE, with comments stripped. A Client half has every reason to quote a package
+// name or an error message in its comments — this one quotes the boot-failure text that its
+// own module.exports seam produced — and a checker that flags documentation is a checker
+// people silence by deleting the documentation.
+const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+check('no import/require of any package', /^\s*(import|const\s+\w+\s*=\s*require\()/m.test(code) === false)
+check('no @deepseek-ai/* reference in code', code.includes('@deepseek-ai/') === false)
+check('no node: builtin reference in code', /node:[a-z/]+/.test(code) === false)
+check('no fs / process / Buffer use in code', /\b(require|process\.|Buffer\.)\b/.test(code) === false)
 
 // --- 2. evaluate the body with a stubbed browser + cordis ----------------------------
 const styleTags = []
@@ -74,20 +81,40 @@ const ctx = {
 
 const sandbox = { React, document, ctx, console, JSON, Set, Array, Object, String, Number, RegExp, Date, Math }
 sandbox.globalThis = sandbox
-// The module loader's factory supplies CommonJS bindings; the Client half assigns through
-// them, so the sandbox must provide them or the plugin never reaches the runner.
 sandbox.module = { exports: {} }
 
-// The Client entry is a plugin *body* — it ends with `return { … }` — so it is evaluated
-// the way DSH evaluates it: wrapped in a function and called.
-const captured = runInContext('(function () {\n' + source + '\n})()', createContext(sandbox))
+// Compile it the way the browser does: as a CLASSIC SCRIPT, not as a function body.
+//
+// This is the check that matters, and whose absence caused a boot failure. The browser loads
+// every Client half as one concatenated classic script, where a bare top-level `return` is a
+// SyntaxError — and a single one takes the whole bundle, and therefore every other client
+// half, down with it. An earlier version of this test wrapped the source in
+// `(function () { … })()`, which makes a top-level `return` legal and so validated a seam
+// that does not exist.
+let captured
+let compileError
+try {
+  captured = new Script(source).runInContext(createContext(sandbox))
+} catch (error) {
+  compileError = error
+}
+check('compiles as a classic script (a top-level return fails here)', compileError === undefined, compileError === undefined ? undefined : String(compileError))
 
-check('the body returns a plugin object', captured !== null && typeof captured === 'object')
-check('the plugin exposes apply()', captured !== null && typeof captured.apply === 'function')
-check('the plugin is also assigned to module.exports', sandbox.module.exports === captured, 'exports=' + Object.keys(sandbox.module.exports || {}).join(','))
+// A belt-and-braces scan, so a failure names the offending line rather than only "SyntaxError".
+const topLevelReturns = source
+  .split('\n')
+  .map((line, index) => ({ line, index: index + 1 }))
+  .filter((entry) => /^return\b/.test(entry.line))
+check('no unindented top-level return statement', topLevelReturns.length === 0, topLevelReturns.map((e) => 'line ' + e.index).join(', '))
 
-if (captured !== null && typeof captured.apply === 'function') {
-  captured.apply(ctx)
+check('the script assigns module.exports', sandbox.module.exports !== null && typeof sandbox.module.exports === 'object')
+check('it assigns a plugin with apply()', typeof sandbox.module.exports.apply === 'function')
+check('the evaluated value and the export are the same plugin', captured === sandbox.module.exports)
+
+const plugin = sandbox.module.exports
+
+if (plugin !== null && typeof plugin.apply === 'function') {
+  plugin.apply(ctx)
 
   check('a stylesheet is inserted into document.head', styleTags.length === 1, 'tags=' + styleTags.length)
   check('the stylesheet is tagged for removal', styleTags[0] !== undefined && styleTags[0].attrs['data-dsh-skill-router'] === 'usage-tab')

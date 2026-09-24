@@ -21,23 +21,25 @@
 // `test/client-half.mjs` pins this one's shape.
 
 /**
- * How the plugin object is handed over.
+ * How the plugin object is handed over — a top-level `module.exports` assignment.
  *
- * Every shipped Client half in this harness assigns `module.exports` (dsh-context, cost
- * meter, skill center all do), and the module loader's factory provides `module`. A bare
- * `return` is how a *dynamic* Package's `code.client` works, which is a different seam.
- * This assigns the export when the CommonJS bindings exist and otherwise hands the plugin
- * back, so neither loader can be surprised — being wrong here means the file applies
- * nothing and the tab silently never appears.
+ * NOT a top-level `return`. Every shipped Client half in this harness assigns
+ * `module.exports`, and the reason is structural: the browser loads all of them as ONE
+ * concatenated classic script (`<script src="/plugins/??a/client.js,b/client.js">`), where a
+ * bare top-level `return` is a **SyntaxError**. A single such statement takes the whole
+ * bundle down, so no client half registers at all — including the HMR client that reports
+ * the failure, which is exactly what a boot failure looked like:
+ *
+ *   bundle /plugins/??…,dsh-skill-router/client.js… loaded without registering
+ *   "@deepseek-ai/dsh-client-hmr" via __ModuleLoader__.load
+ *
+ * A bare `return` is how a *dynamic* Package's `code.client` works — that half really is a
+ * function body. Two different seams. This file used to confuse them, and the test meant to
+ * catch it wrapped the source in a function, validating the fiction instead of the loader.
+ * `test/client-half.mjs` now compiles this file as a classic script, which is the check that
+ * would have failed.
  */
-function exportPlugin(plugin) {
-  if (typeof module !== 'undefined' && module !== null && typeof module === 'object') {
-    module.exports = plugin
-  }
-  return plugin
-}
-
-return exportPlugin({
+module.exports = {
   name: 'dsh-skill-router-client',
   apply(ctx) {
     const slots = ctx.get('slots')
@@ -389,4 +391,4 @@ return exportPlugin({
       'skill-router: usage tab',
     )
   },
-})
+}
