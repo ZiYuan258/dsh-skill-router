@@ -369,7 +369,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Eighteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Nineteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -387,12 +387,15 @@ Eighteen dependency-free scripts. They run against a real staged library when on
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `usage.mjs` | the usage tab's data extraction: all three loading tools count, `skill_search` does not, `tool-result` nodes are not counted twice, JSON-string arguments parse, malformed input returns an empty list instead of throwing |
-| `client-half.mjs` | **actually renders** the tab inside `node:vm` with stubbed React/DOM/ctx: Chinese name and English original both appear, the counts are right, a missing `useChat` seat degrades; it also asserts the Client half imports no package, contains no `@deepseek-ai/*` and touches no `node:` builtin |
+| `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declaration, and proves `apply()` survives four document timings; then **actually renders** the tab (Chinese name, English original, counts, degrading when the `useChat` seat is missing) |
+| `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `node tools/audit-library-risk.mjs` audits any library for risky content.
+
+`node tools/audit-client-halves.mjs` is deliberately **not** in `npm test`: it scans the Client halves of every plugin installed in **your** profile, so it is not self-contained. It should report a broken third-party plugin (that is the diagnostic), but it must not turn this repository's suite red for someone else's defect. It exists because this plugin broke DSH startup twice, and the report named only HMR while the broken file sat in the middle of the list.
 
 ## Layout
 
@@ -401,8 +404,9 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         eighteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         nineteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
+tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)
 .github/workflows/            CI: npm test on Linux and Windows, Node 20 / 22 / 24
 ```

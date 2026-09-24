@@ -337,14 +337,28 @@ window.__ModuleLoader__.load({
 
     // A Client bundle has no styles.insert (that is a dynamic-sandbox builtin), so the
     // stylesheet is inserted the ordinary way and removed when the plugin unloads.
+    //
+    // The guard is not defensive padding. `apply()` runs as soon as the bundle is evaluated,
+    // and an unguarded `document.head.appendChild` throws a TypeError whenever the script is
+    // evaluated before <head> exists — a classic-script tag inside <head> itself, an iframe, a
+    // shadow root, or any harness that evaluates client halves without a document. Verified by
+    // running apply() with `head: null`: it threw, an uncaught exception in apply() means the
+    // slot registration below never runs, and the tab silently does not exist. A stylesheet is
+    // cosmetic; losing the whole tab over it is not a trade worth making.
     ctx.effect(
       () => {
-        const tag = document.createElement('style')
+        const doc = typeof document === 'undefined' ? undefined : document
+        if (doc === undefined || typeof doc.createElement !== 'function') return () => {}
+        // `head` can be null while the parser is still inside <head>; documentElement or body
+        // accept the same child and keep the styles applied.
+        const host = doc.head !== null && doc.head !== undefined ? doc.head : doc.documentElement !== null && doc.documentElement !== undefined ? doc.documentElement : doc.body
+        if (host === null || host === undefined || typeof host.appendChild !== 'function') return () => {}
+        const tag = doc.createElement('style')
         tag.setAttribute('data-dsh-skill-router', 'usage-tab')
         tag.textContent = CSS
-        document.head.appendChild(tag)
+        host.appendChild(tag)
         return () => {
-          if (tag.parentNode !== null) tag.parentNode.removeChild(tag)
+          if (tag.parentNode !== null && tag.parentNode !== undefined) tag.parentNode.removeChild(tag)
         }
       },
       'skill-router: usage tab styles',

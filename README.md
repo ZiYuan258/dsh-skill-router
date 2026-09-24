@@ -375,7 +375,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十八个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十九个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -393,12 +393,15 @@ npm test
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `usage.mjs` | 技能看板的数据提取：三种加载工具都算、`skill_search` 不算、`tool-result` 节点不重复计、参数为 JSON 字符串时可解析、坏输入返回空数组而不抛 |
-| `client-half.mjs` | 在 `node:vm` 里用桩 React/DOM/ctx **真的渲染一次**标签页：中文名与英文原名都出现、计数正确、缺 `useChat` 座位时降级；并断言客户端半不 import 任何包、不出现 `@deepseek-ai/*`、不碰 `node:` 内建 |
+| `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**真的渲染一次**标签页（中文名、英文原名、计数、缺 `useChat` 座位时降级） |
+| `package-contract.mjs` | 加载器会读的每一样东西：`exports`/`main`/`dsh.client`/`dsh.bundle`/`files`、客户端半作为**经典脚本**可编译且自带 `load()` 注册、`host.js` 的导出形状、组合行 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
 | `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 指定要测的技能库；`node tools/audit-library-risk.mjs` 可对任意库做风险审计。
+
+`node tools/audit-client-halves.mjs` 不在 `npm test` 里，这是有意的：它扫的是**你本机** profile 里所有插件的客户端半，不具备自包含性——装了别人的坏插件时它应该报出来（那是诊断），但不该让本仓库的测试无故变红。它存在的原因是本插件让 DSH 启动失败过两次，而报错只点名 HMR，真正坏掉的那份在列表中间。
 
 ## 目录结构
 
@@ -407,8 +410,9 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十八个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         十九个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
+tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
 docs/                         各版本的发布说明（双语，中文在前）
 .github/workflows/            CI：Linux 与 Windows 上、Node 20 / 22 / 24 各跑一遍 npm test
 ```

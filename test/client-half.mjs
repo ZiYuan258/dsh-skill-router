@@ -59,6 +59,54 @@ const document = {
   },
 }
 
+// --- 3. apply() must survive the document timings it can actually meet ---------------
+//
+// `apply()` runs the moment the bundle is evaluated, which is not necessarily when a
+// document is ready. Verified the hard way: with `head: null` the unguarded version threw
+// "Cannot read properties of null (reading 'appendChild')", and an exception inside apply()
+// means the slot registration below it never runs — the tab simply would not exist, with no
+// error the user could act on. A stylesheet is cosmetic; it must never be able to take the
+// tab down. Each timing is re-run here so a future edit cannot quietly reintroduce it.
+const timings = [
+  ['a ready document (head present)', () => ({ createElement: mkEl, head: mkHost() })],
+  ['head not created yet (null), documentElement present', () => ({ createElement: mkEl, head: null, documentElement: mkHost() })],
+  ['head and documentElement absent, body present', () => ({ createElement: mkEl, head: null, documentElement: null, body: mkHost() })],
+  ['no document at all', () => undefined],
+]
+
+function mkEl(tag) {
+  return { tag, attrs: {}, textContent: '', setAttribute(k, v) { this.attrs[k] = v }, parentNode: null }
+}
+function mkHost() {
+  return { children: [], appendChild(node) { node.parentNode = this; this.children.push(node); return node } }
+}
+
+for (const [label, make] of timings) {
+  const registrationSeen = []
+  const localRegistered = []
+  const doc = make()
+  const sandbox2 = {
+    window: { __ModuleLoader__: { load: (spec) => registrationSeen.push(spec) } },
+    console,
+  }
+  if (doc !== undefined) sandbox2.document = doc
+  sandbox2.globalThis = sandbox2
+  let error
+  try {
+    new Script(source).runInContext(createContext(sandbox2))
+    const localPlugin = registrationSeen[0].factory(() => React)
+    const localSlots = {
+      inject: (key, cb) => { const d = cb(); return typeof d === 'function' ? d : () => {} },
+      register: (options, Component) => { localRegistered.push({ options, Component }); return () => {} },
+    }
+    localPlugin.apply({ get: (n) => (n === 'slots' ? localSlots : undefined), effect: (cb) => { const d = cb(); return typeof d === 'function' ? d : () => {} } })
+  } catch (caught) {
+    error = caught
+  }
+  check('apply() survives ' + label, error === undefined, error === undefined ? undefined : String(error).slice(0, 90))
+  check('the tab still registers with ' + label, localRegistered.length === 1, 'registrations=' + localRegistered.length)
+}
+
 const slots = {
   inject(key, callback) {
     const dispose = callback()
