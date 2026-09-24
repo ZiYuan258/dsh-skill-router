@@ -417,7 +417,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-二十个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+二十一个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -440,9 +440,12 @@ npm test
 | `package-contract.mjs` | 加载器会读的每一样东西：`exports`/`main`/`dsh.client`/`dsh.bundle`/`files`、客户端半作为**经典脚本**可编译且自带 `load()` 注册、`host.js` 的导出形状、组合行 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
+| `release-consistency.mjs` | 发版一致性（离线部分）：两处版本号一致、当前版本有发布说明、每份说明的标题以自己版本号开头、双语齐全、每个版本 tag 都有说明、流程文档与发布脚本都在 |
 | `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 指定要测的技能库；`node tools/audit-library-risk.mjs` 可对任意库做风险审计。
+
+发版流程见 `RELEASING.md`：**tag 与 Release 是两个对象**，`git push` 只推送前者，所以最后一步是 `node tools/publish-release.mjs`（漏了不会有人收到通知，本仓库曾因此连续 14 个版本只有 tag 没有 Release）。
 
 `node tools/audit-client-halves.mjs` 不在 `npm test` 里，这是有意的：它扫的是**你本机** profile 里所有插件的客户端半，不具备自包含性——装了别人的坏插件时它应该报出来（那是诊断），但不该让本仓库的测试无故变红。它存在的原因是本插件让 DSH 启动失败过两次，而报错只点名 HMR，真正坏掉的那份在列表中间。
 
@@ -453,7 +456,8 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         二十个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         二十一个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
 docs/                         各版本的发布说明（双语，中文在前）

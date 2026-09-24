@@ -412,7 +412,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Twenty dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Twenty-one dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -435,9 +435,12 @@ Twenty dependency-free scripts. They run against a real staged library when one 
 | `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
+| `release-consistency.mjs` | release consistency, offline half: both version strings agree, the current version has notes, every notes heading starts with its own version, every notes file is bilingual, every version tag has notes, and the process doc plus the release script exist |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `node tools/audit-library-risk.mjs` audits any library for risky content.
+
+The release process is in `RELEASING.md`: **a tag and a Release are two different objects**, `git push` only delivers the former, so the last step is `node tools/publish-release.mjs`. Skipping it notifies nobody — this repository spent fourteen versions with tags but no Releases before anyone looked at the releases page.
 
 `node tools/audit-client-halves.mjs` is deliberately **not** in `npm test`: it scans the Client halves of every plugin installed in **your** profile, so it is not self-contained. It should report a broken third-party plugin (that is the diagnostic), but it must not turn this repository's suite red for someone else's defect. It exists because this plugin broke DSH startup twice, and the report named only HMR while the broken file sat in the middle of the list.
 
@@ -448,7 +451,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         twenty runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         twenty-one runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

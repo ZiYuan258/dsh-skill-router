@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-router",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "DeepSeek Harness plugin adding the skill_search / skill_load / skill_ref tools and a 技能 tab that lists what the session actually loaded, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
   "license": "MIT",
   "private": true,
@@ -44,7 +44,7 @@
     "node": ">=20.18.0"
   },
   "scripts": {
-    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs && node test/robustness.mjs && node test/skill-ref.mjs && node test/index-format.mjs && node test/index-header.mjs && node test/minimal-host.mjs && node test/link-support.mjs && node test/stale-and-duplicates.mjs && node test/usage-ledger.mjs && node test/usage-tab.mjs && node test/client-half.mjs && node test/package-contract.mjs && node test/workflow-config.mjs && node test/docs-parity.mjs && node test/no-local-paths.mjs"
+    "test": "node test/boot-safety.mjs && node test/schema-forms.mjs && node test/shape.mjs && node test/verify.mjs && node test/collisions.mjs && node test/batch.mjs && node test/robustness.mjs && node test/skill-ref.mjs && node test/index-format.mjs && node test/index-header.mjs && node test/minimal-host.mjs && node test/link-support.mjs && node test/stale-and-duplicates.mjs && node test/usage-ledger.mjs && node test/usage-tab.mjs && node test/client-half.mjs && node test/package-contract.mjs && node test/workflow-config.mjs && node test/docs-parity.mjs && node test/release-consistency.mjs && node test/no-local-paths.mjs"
   },
   "dsh": {
     "engines": {
