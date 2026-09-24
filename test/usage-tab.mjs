@@ -135,14 +135,25 @@ const textOf = (node) => {
 }
 
 // ── 受控时钟 ────────────────────────────────────────────────────────────────────
-// vm 上下文**不继承**宿主全局：`createContext({window, console})` 里没有 setTimeout。
-// 第一版忘了给，组件一订阅就抛 ReferenceError。真实浏览器里一定有时钟，测试里给一个受控的，
-// 节流才能被断言，而不是只能靠等。
+// vm 上下文**不继承**宿主全局：`createContext({window, console})` 里没有 setTimeout，也没有
+// Date。第一版忘给 setTimeout，组件一订阅就抛 ReferenceError。而"读取中"改成**有截止时间**之后
+// Date 也必须受控，否则"过没过期"取决于测试跑得多快——那正是"永远读取中"这类缺陷的温床。
 const makeClock = () => {
-  let now = 0
+  let now = 1_000_000
   let seq = 0
   const timers = new Map()
+  const intervals = new Map()
+  class FakeDate extends Date {
+    constructor(...args) {
+      super(...(args.length === 0 ? [now] : args))
+    }
+    static now() {
+      return now
+    }
+  }
   return {
+    now: () => now,
+    Date: FakeDate,
     setTimeout: (fn, delay) => {
       const id = ++seq
       timers.set(id, { at: now + (delay === undefined ? 0 : delay), fn, seq: id })
@@ -151,14 +162,37 @@ const makeClock = () => {
     clearTimeout: (id) => {
       timers.delete(id)
     },
+    setInterval: (fn, delay) => {
+      const every = delay === undefined || delay <= 0 ? 1 : delay
+      const id = ++seq
+      intervals.set(id, { every, next: now + every, fn, seq: id })
+      return id
+    },
+    clearInterval: (id) => {
+      intervals.delete(id)
+    },
+    /** 推进时间，按到期顺序触发 timeout 与 interval 回调，返回触发个数。 */
     advance: (ms) => {
-      now += ms
-      const due = [...timers.values()].filter((t) => t.at <= now).sort((a, b) => a.at - b.at || a.seq - b.seq)
-      for (const timer of due) {
-        timers.delete(timer.seq)
-        timer.fn()
+      const target = now + ms
+      let fired = 0
+      for (;;) {
+        const dueTimer = [...timers.values()].filter((t) => t.at <= target).sort((a, b) => a.at - b.at || a.seq - b.seq)[0]
+        const dueInterval = [...intervals.values()].filter((t) => t.next <= target).sort((a, b) => a.next - b.next || a.seq - b.seq)[0]
+        if (dueTimer === undefined && dueInterval === undefined) break
+        if (dueTimer !== undefined && (dueInterval === undefined || dueTimer.at <= dueInterval.next)) {
+          now = dueTimer.at
+          timers.delete(dueTimer.seq)
+          dueTimer.fn()
+        } else {
+          now = dueInterval.next
+          dueInterval.next = now + dueInterval.every
+          dueInterval.fn()
+        }
+        fired += 1
+        if (fired > 500) break
       }
-      return due.length
+      now = target
+      return fired
     },
   }
 }
@@ -207,6 +241,9 @@ const mount = (options) => {
     console: { log() {}, error() {} },
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    setInterval: clock.setInterval,
+    clearInterval: clock.clearInterval,
+    Date: clock.Date,
   }
   sandbox.globalThis = sandbox
   new Script(sourceText).runInContext(createContext(sandbox))
@@ -361,6 +398,8 @@ check('inject 收到的 sessionId 被用来取绑定', loaded.propsFor('session-
   const text = textOf(loaded.fake.render(loaded.Component, loaded.propsFor('s1')))
   check('标签页印出运行版本', /dsh-skill-router v\d+\.\d+\.\d+/.test(text), text.slice(-140))
   check('标签页印出翻页状态', /(已读完|读取中|无进展停止|超时停止|到上限停止|出错)/.test(text), text.slice(-140))
+  // 「尝试 0」+「读取中」= effect 压根没启动过；这是无法从外部区分的那类事实，所以它必须印出来。
+  check('标签页印出尝试/收尾计数（区分「没启动」与「启动了没收敛」）', /尝试 \d+\/收尾 \d+/.test(text), text.slice(-140))
 }
 
 // --- 2. 座位缺席：给一句话，绝不冒充「读了但没有」 ------------------------------
@@ -630,6 +669,40 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   const stuck = textOf(second.fake.render(second.Component, fresh2()))
   check('重渲染下令看门狗仍然到期', stuck.indexOf('读取中') < 0, stuck.slice(-140))
   check('看门狗到期后报告超时停止', stuck.indexOf('超时停止') >= 0, stuck.slice(-140))
+}
+
+// --- 11. 「读取中」必须有截止时间，且不依赖任何回调 ------------------------------
+//
+// 真机上 v1.6.9 与 v1.7.0 都停在「读取中」，说明"只有回调能清掉 loading"这个设计本身不成立：
+// 只要那条回调链断在任何一环，标签页就永远在撒谎。所以"读取中"现在是一个**截止时间**——到点
+// 自动过期，不需要任何东西触发；再加一个心跳，只为了让过期这件事被渲染出来。
+{
+  // (a) 请求永不 settle、且看门狗被外力清掉（模拟"回调链断掉"）：心跳必须兜住。
+  const source = makeSource({ entries: [entry(call('d1', 'skill_load', { name: 'deadline-a' }))], hasMore: true })
+  source.loadOlder = () => new Promise(() => {})
+  const { fake, clock, Component, propsFor } = mount({ source })
+  const props = propsFor('s1')
+  const first = textOf(fake.render(Component, props))
+  check('首屏如实显示「读取中」', first.indexOf('读取中') >= 0, first.slice(-140))
+  // 推进超过截止时间：心跳到期并把「读取中」摘掉。
+  clock.advance(4000)
+  const after = textOf(fake.render(Component, props))
+  check('超过截止时间后不再显示「读取中」', after.indexOf('读取中') < 0, after.slice(-140))
+  check('并给出停止原因', /(超时停止|无进展停止)/.test(after), after.slice(-140))
+
+  // (b) 账本一直完好、翻页正常完成时，心跳不得把状态误判成超时。
+  const fine = makeSource({
+    entries: [entry(call('f0', 'skill_load', { name: 'deadline-b' }))],
+    hasMore: true,
+    onLoadOlder: () => ({ entries: [entry(call('f1', 'pwsh', { command: 'ls' })), entry(call('f0', 'skill_load', { name: 'deadline-b' }))], hasMore: false }),
+  })
+  const second = mount({ source: fine })
+  const p2 = second.propsFor('s1')
+  second.fake.render(second.Component, p2)
+  await settle(second.fake, second.Component, p2)
+  second.clock.advance(20000)
+  const ok = textOf(second.fake.render(second.Component, p2))
+  check('正常完成后心跳不误报超时', ok.indexOf('已读完') >= 0, ok.slice(-140))
 }
 
 // --- 11. 卸载时不留悬挂订阅 -----------------------------------------------------

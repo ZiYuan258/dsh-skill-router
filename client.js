@@ -541,7 +541,7 @@ window.__ModuleLoader__.load({
         // "paging gave up here" from "the history ended here". Merging them once made a stalled
         // session print a complete-looking total.
         stalled: state.stalled === true,
-        loading: state.loading,
+        loading: state.loading === true,
         error: state.error,
         page: state.page,
       })
@@ -600,6 +600,28 @@ window.__ModuleLoader__.load({
        */
       const watchdogRef = React.useRef(undefined)
       const unmountedRef = React.useRef(false)
+      /** Diagnostic counters, printed in the version line: they say whether the effect ever ran. */
+      const attemptsRef = React.useRef(0)
+      const concludesRef = React.useRef(0)
+      /**
+       * When paging started, and the deadline it has to finish by.
+       *
+       * `loading` used to be a boolean that only a callback could clear, which made the tab's
+       * honesty depend on every one of the callbacks above firing. Two live reports carried the
+       * version line and still read "读取中" — the code was current and the state never resolved,
+       * and I could not tell from outside whether the effect had run at all, whether the watchdog
+       * was armed, or whether it fired and was discarded.
+       *
+       * So loading is now a *deadline*, not a flag: the tab is "reading" only while the clock says
+       * the attempt is still within its allowance. Nothing has to fire for that to become false —
+       * the next render after the deadline simply reads the time. Everything that used to clear the
+       * flag now clears the deadline instead.
+       *
+       * `startedAt` is a deadline rather than a flag, and it participates in no dependency array, so
+       * writing it can never re-enter an effect.
+       */
+      const [state, setState] = React.useState({ page: 0, startedAt: usable ? Date.now() : 0, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
+      const reading = state.startedAt !== 0 && Date.now() - state.startedAt < LOAD_OLDER_TIMEOUT_MS
       React.useEffect(
         () => () => {
           unmountedRef.current = true
@@ -610,7 +632,24 @@ window.__ModuleLoader__.load({
         },
         [],
       )
-      const [state, setState] = React.useState({ page: 0, loading: usable, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
+
+      /**
+       * A heartbeat that exists only to re-render after the deadline.
+       *
+       * The deadline makes "reading" expire on its own, but expiring is invisible until something
+       * renders. Every other render source in this hook is an event (a ledger change, a resolved
+       * page, a state write from an effect) — and the whole failure being defended against is a
+       * chain of events that stopped arriving. This interval is the one render source that does not
+       * depend on any of them, and it stops itself as soon as nothing is pending.
+       */
+      React.useEffect(() => {
+        if (reading === false) return undefined
+        const timer = setInterval(() => {
+          if (unmountedRef.current === true) return
+          setState((prev) => (prev.startedAt === 0 ? prev : { page: prev.page, startedAt: Date.now() - LOAD_OLDER_TIMEOUT_MS, stalled: true, timedOut: true, error: prev.error, tick: prev.tick + 1 }))
+        }, LOAD_OLDER_TIMEOUT_MS)
+        return () => clearInterval(timer)
+      }, [reading])
 
       // One long-lived reader. `push` is stable on purpose: an effect that re-subscribed on
       // every snapshot would detach and reattach the observable on each new event, and the
@@ -624,7 +663,7 @@ window.__ModuleLoader__.load({
         // symptom was 399 `loadOlder` calls against a cap of 200, and it only shows up on a
         // ledger whose history never ends. Only the paging effect and `loadOlder`'s own
         // resolution may write `loading`; this callback only says "the window moved".
-        setState((prev) => ({ page: prev.page, loading: prev.loading, stalled: prev.stalled, timedOut: prev.timedOut, error: prev.error, tick: prev.tick + 1 }))
+        setState((prev) => ({ page: prev.page, startedAt: prev.startedAt, stalled: prev.stalled, timedOut: prev.timedOut, error: prev.error, tick: prev.tick + 1 }))
       }, [usable, source])
 
       React.useEffect(() => {
@@ -669,17 +708,17 @@ window.__ModuleLoader__.load({
         // exactly that.) A retry that sees anything new is progress, not a stall.
         if (before.entries.length > seenRef.current) seenRef.current = before.entries.length
         if (before.hasMore === false) {
-          // Nothing to page. The initial state cannot know that — it is seeded with `usable` so
-          // the first paint already says "reading" instead of showing an unfinished count — so
-          // it is cleared here. Without this a session whose window is fully loaded would sit on
+          // Nothing to page. The initial state cannot know that — it is seeded as "reading" so the
+          // first paint already says so instead of showing an unfinished count — so the deadline is
+          // retired here. Without this a session whose window is fully loaded would sit on
           // "正在读取更早的记录…" forever.
-          setState((prev) => (prev.loading === true ? { page: prev.page, loading: false, tick: prev.tick } : prev))
+          setState((prev) => (prev.startedAt === 0 ? prev : { page: prev.page, startedAt: 0, tick: prev.tick }))
           return undefined
         }
         if (inFlightRef.current === true) return undefined
         if (pageRef.current >= LOAD_OLDER_CAP) {
           gaveUpRef.current = true
-          setState((prev) => (prev.stalled === true ? prev : { page: prev.page, loading: false, stalled: true, timedOut: false, tick: prev.tick }))
+          setState((prev) => (prev.stalled === true ? prev : { page: prev.page, startedAt: 0, stalled: true, timedOut: false, tick: prev.tick }))
           return undefined
         }
 
@@ -690,17 +729,19 @@ window.__ModuleLoader__.load({
         // limit could never be reached and the tab was back to retrying forever.
         let attempts = 0
         inFlightRef.current = true
-        setState((prev) => (prev.loading === true ? prev : { page: prev.page, loading: true, tick: prev.tick }))
+        attemptsRef.current += 1
+        setState((prev) => (prev.startedAt !== 0 ? prev : { page: prev.page, startedAt: Date.now(), tick: prev.tick }))
 
         const conclude = (patch) => {
           if (live === false || unmountedRef.current === true) return
           live = false
+          concludesRef.current += 1
           if (watchdogRef.current !== undefined) {
             clearTimeout(watchdogRef.current)
             watchdogRef.current = undefined
           }
           inFlightRef.current = false
-          setState((prev) => Object.assign({ page: prev.page, loading: false, stalled: false, timedOut: false, tick: prev.tick + 1 }, patch))
+          setState((prev) => Object.assign({ page: prev.page, startedAt: 0, stalled: false, timedOut: false, tick: prev.tick + 1 }, patch))
         }
 
         /** One page request, then judge it by what the WINDOW did — never by the promise alone. */
@@ -766,8 +807,10 @@ window.__ModuleLoader__.load({
       }, [state.tick, usable, source])
 
       const ledger = React.useMemo(
-        () => (usable ? ledgerFrom(seedRef.current, source.getSnapshot(), state) : buildLedger([], { hasMore: false, loading: false, error: absent })),
-        [usable, source, state.tick, state.loading, state.page, state.error, state.stalled],
+        () => (usable ? ledgerFrom(seedRef.current, source.getSnapshot(), { page: state.page, loading: reading, stalled: state.stalled, error: state.error }) : buildLedger([], { hasMore: false, loading: false, error: absent })),
+        // `reading` is derived from the clock, so it is listed by name: when the heartbeat re-renders
+        // past the deadline this memo has to recompute, or the tab keeps rendering the old verdict.
+        [usable, source, state.tick, reading, state.page, state.error, state.stalled],
       )
       // A page that is merely `partial` is a real answer; one with no ledger at all is not, and
       // the difference is carried out to the view rather than inferred there. The two absent
@@ -776,13 +819,17 @@ window.__ModuleLoader__.load({
       // `stalled` is carried out too, so the view can say "paging gave up" rather than "reading".
       return {
         ledger,
-        loading: state.loading,
+        loading: reading,
         page: state.page,
         stalled: state.stalled === true,
         timedOut: state.timedOut === true,
         error: state.error,
         usable,
         absent: usable ? null : absent,
+        // Diagnostic, printed in the version line. `attempts === 0` while the tab says "reading"
+        // means the paging effect never started — which is a fact about the runtime, not a guess.
+        attempts: attemptsRef.current,
+        concludes: concludesRef.current,
       }
     }
 
@@ -911,10 +958,10 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.7.0'
+    const VERSION = '1.7.1'
 
     function UsageView(props) {
-      const { ledger, usable, absent, timedOut } = useUsageLedger(props)
+      const { ledger, usable, absent, timedOut, attempts, concludes } = useUsageLedger(props)
 
       // No ledger to read: say that, and say ONLY that. The summary and coverage lines below
       // are statements about data that was read, so printing them here would turn "I could not
@@ -950,7 +997,7 @@ window.__ModuleLoader__.load({
         React.createElement(
           'p',
           { className: 'sr-usage-ver' },
-          'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut),
+          'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut) + ' · 尝试 ' + String(attempts) + '/收尾 ' + String(concludes),
         ),
       )
     }
