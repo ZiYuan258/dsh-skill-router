@@ -487,7 +487,59 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   check('换会话后读到的是那个会话的账本', b.indexOf('skill-in-b') >= 0 && b.indexOf('skill-in-a') < 0, b.slice(0, 200))
 }
 
-// --- 8. inject 的两个参数都能用 -------------------------------------------------
+// --- 8. 读取卡住时必须给结论，不能永远「正在读取」 ------------------------------
+//
+// 这三条来自真机观察：标签页在浏览器里停在「已读到第 0 页…仍在继续」，因为一次翻页请求永远
+// 没有 settle，而 loading 只在 resolve/reject 时被改写。测试跑不到这条路径，是因为替身的
+// loadOlder 总是立刻 resolve —— 又一次「替身比现实更友好」。
+{
+  // (a) loadOlder 返回非 promise（宿主侧接口不保证返回 promise，`.then` 会当场抛）
+  const nonPromise = makeSource({ entries: [entry(call('n1', 'skill_load', { name: 'kept-while-paging' }))], hasMore: true })
+  nonPromise.loadOlder = () => undefined
+  {
+    const { fake, clock, Component, propsFor } = mount({ source: nonPromise })
+    const props = propsFor('s1')
+    const first = textOf(fake.render(Component, props))
+    check('非 promise 的 loadOlder 不使标签页崩溃', first.indexOf('技能调用清单') >= 0, first.slice(0, 160))
+    await settle(fake, Component, props)
+    const text = textOf(fake.render(Component, props))
+    check('非 promise 时不再声称仍在读取', text.indexOf('仍在继续') < 0, text.slice(0, 220))
+    check('非 promise 时保留已读到的记录', text.indexOf('kept-while-paging') >= 0, text.slice(0, 220))
+    clock.advance(20000)
+    fake.flush(Component, props)
+    check('非 promise 时不会无限翻页', nonPromise.loadOlderCalls <= 1, 'loadOlder=' + nonPromise.loadOlderCalls)
+  }
+
+  // (b) loadOlder 永远不 settle：看门狗必须兜住
+  const never = makeSource({ entries: [entry(call('w1', 'skill_load', { name: 'stuck-then-ok' }))], hasMore: true })
+  never.loadOlder = () => new Promise(() => {})
+  {
+    const { fake, clock, Component, propsFor } = mount({ source: never })
+    const props = propsFor('s1')
+    const first = textOf(fake.render(Component, props))
+    check('未 settle 时先如实显示「仍在继续」', first.indexOf('仍在继续') >= 0, first.slice(0, 200))
+    clock.advance(8000)
+    fake.flush(Component, props)
+    const after = textOf(fake.render(Component, props))
+    check('看门狗到期后不再说「仍在继续」', after.indexOf('仍在继续') < 0, after.slice(0, 240))
+    check('看门狗到期后说明已停止读取', after.indexOf('不再继续读取') >= 0, after.slice(0, 240))
+    check('停住后不打印「共 N 次调用」', after.indexOf('本会话共 ') < 0, after.slice(0, 240))
+    check('停住后仍列出已读到的技能', after.indexOf('stuck-then-ok') >= 0, after.slice(0, 240))
+    const callsAtStall = never.loadOlderCalls
+    clock.advance(20000)
+    fake.flush(Component, props)
+    await settle(fake, Component, props)
+    check('停住之后不再发起新请求', never.loadOlderCalls === callsAtStall, 'loadOlder=' + never.loadOlderCalls)
+    // 但实时尾部仍然要活着：账本后来出现了新调用，必须能看到。
+    never.append(call('w2', 'skill_load', { name: 'arrived-later' }))
+    clock.advance(400)
+    fake.flush(Component, props)
+    const live = textOf(fake.render(Component, props))
+    check('停住翻页不影响实时新记录', live.indexOf('arrived-later') >= 0, live.slice(0, 240))
+  }
+}
+
+// --- 9. inject 的两个参数都能用 -------------------------------------------------
 // 渲染器按作用域绑定的 key 调 inject；第二个参数只在带上下文的渲染路径上被传。所以两种都必须
 // 能拿到账本——只赌其中一个，就是在赌渲染器走哪条路。
 {
