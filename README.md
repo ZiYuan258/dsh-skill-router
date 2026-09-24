@@ -346,7 +346,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十二个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十三个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -375,7 +375,7 @@ SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
 test/                         十三个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）
-.github/workflows/            CI：Node 20 / 22 / 24 上跑 npm test
+.github/workflows/            CI：Linux 与 Windows 上、Node 20 / 22 / 24 各跑一遍 npm test
 ```
 
 ## 安全

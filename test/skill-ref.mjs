@@ -15,12 +15,16 @@ const check = (label, condition, detail) => {
 // --- resolvePath: the containment primitive ----------------------------------
 console.log('resolvePath (no I/O, must reject ../ before any read):')
 // resolvePath normalizes without relativizing: the root is preserved, `.`/`..` collapse.
+//
+// `Q:` on purpose: a drive letter that cannot exist as a real path here, so these stay
+// unmistakably test inputs. `C:` would read as a machine path — including to this repo's
+// own no-local-paths scanner.
 const cases = [
-  ['C:/lib/skills/foo/references/a.md', 'C:/lib/skills/foo/references/a.md'],
-  ['C:\\lib\\skills\\foo\\references\\a.md', 'C:/lib/skills/foo/references/a.md'],
-  ['C:/lib/skills/foo/./a.md', 'C:/lib/skills/foo/a.md'],
-  ['C:/lib/skills/foo/x/../a.md', 'C:/lib/skills/foo/a.md'],
-  ['C:/lib/skills/foo/../../../etc/passwd', 'C:/etc/passwd'],
+  ['Q:/lib/skills/foo/references/a.md', 'Q:/lib/skills/foo/references/a.md'],
+  ['Q:\\lib\\skills\\foo\\references\\a.md', 'Q:/lib/skills/foo/references/a.md'],
+  ['Q:/lib/skills/foo/./a.md', 'Q:/lib/skills/foo/a.md'],
+  ['Q:/lib/skills/foo/x/../a.md', 'Q:/lib/skills/foo/a.md'],
+  ['Q:/lib/skills/foo/../../../etc/passwd', 'Q:/etc/passwd'],
   ['/abs/lib/foo/a.md', '/abs/lib/foo/a.md'],
   ['/abs/lib/foo/../bar', '/abs/lib/bar'],
 ]
@@ -28,7 +32,7 @@ for (const [input, expected] of cases) {
   const got = resolvePath(input)
   check(`${input}  ->  ${expected}`, got === expected, 'got ' + got)
 }
-const root = resolvePath('C:/lib/skills/foo')
+const root = resolvePath('Q:/lib/skills/foo')
 const contained = (p) => {
   const full = resolvePath(root + '/' + p)
   return full === root || full.startsWith(root + '/')

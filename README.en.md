@@ -340,7 +340,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Twelve dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Thirteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -369,7 +369,7 @@ SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
 test/                         thirteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
-.github/workflows/            CI: npm test on Node 20 / 22 / 24
+.github/workflows/            CI: npm test on Linux and Windows, Node 20 / 22 / 24
 ```
 
 ## Security

@@ -50,11 +50,16 @@ export function findRealDshTools() {
   const home = process.env.USERPROFILE ?? process.env.HOME
   if (process.env.DSH_HOME !== undefined) roots.push(process.env.DSH_HOME)
   if (home !== undefined) {
-    // The DSH home itself, plus the shared profiles tree it keeps its packages in,
-    // plus a packaged Desktop install.
+    // The DSH home itself, plus the shared profiles tree it keeps its packages in, plus a
+    // packaged Desktop install. The install location is per-platform: an earlier version
+    // listed only the Windows one, so on Linux and macOS this jumped straight to the local
+    // assertions and quietly validated less than it could have.
     roots.push(join(home, '.dsh'))
     roots.push(join(home, '.dsh', 'profiles'))
-    roots.push(join(home, 'AppData', 'Roaming', 'DSH Desktop', 'resources', 'app'))
+    roots.push(join(home, 'AppData', 'Roaming', 'DSH Desktop', 'resources', 'app')) // Windows
+    roots.push(join(home, 'Library', 'Application Support', 'DSH Desktop', 'resources', 'app')) // macOS
+    roots.push(join(home, '.local', 'share', 'DSH Desktop', 'resources', 'app')) // Linux
+    roots.push(join(home, 'Applications', 'DSH Desktop.app', 'Contents', 'Resources', 'app')) // macOS .app
   }
   roots.push(findUp(here, 'resources'))
   const candidates = []

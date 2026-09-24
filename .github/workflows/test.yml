@@ -15,9 +15,18 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      # One failing leg must not cancel the others. GitHub's fail-fast cancels the rest as
+      # soon as the first leg fails, so a real failure on every platform gets reported as
+      # one failure plus a row of "cancelled" — which is exactly how a genuine three-leg
+      # failure was once read as a single failure at the time.
+      fail-fast: false
       matrix:
+        # Windows is a first-class target, not an afterthought: resolvePath() carries
+        # drive-letter and backslash handling, the directory-link recipe is a junction,
+        # and the docs' main path is PowerShell. Testing only Linux left that unverified.
+        os: [ubuntu-latest, windows-latest]
         node: ['20.x', '22.x', '24.x']
     steps:
       # Pinned to a major version tag, never @main: a floating ref lets the action's

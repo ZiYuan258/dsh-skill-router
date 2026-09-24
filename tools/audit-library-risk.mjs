@@ -20,7 +20,11 @@ const walk = (dir, depth) => {
     return
   }
   for (const entry of entries) {
-    if (entry.name === 'node_modules' || entry.name === 'stageout') continue
+    // node_modules is skipped because it is not the library. Nothing else is: an earlier
+    // version also skipped a directory named after the author's scratch space, which
+    // meant an audit on anyone else's machine silently ignored a directory by that name —
+    // a machine-local convention changing the answer a security tool gives.
+    if (entry.name === 'node_modules') continue
     const path = join(dir, entry.name)
     if (entry.isDirectory()) walk(path, depth + 1)
     else if (entry.name === 'SKILL.md') files.push(path)

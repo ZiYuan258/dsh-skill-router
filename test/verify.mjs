@@ -72,8 +72,16 @@ check('unknown name reports an actionable error', String(miss.skills?.[0]?.error
 const empty = await load.execute({}, exec)
 check('empty call explains how to pass a name', String(empty.note ?? '').includes('Pass name'))
 
-const outside = await search.execute({ query: 'x' }, makeExec(process.platform === 'win32' ? 'C:\\Windows' : '/'))
+// A cwd that cannot contain a library: the filesystem root. The Windows form is `C:/`
+// rather than a home directory — the point is only "the walk-up reaches the top and finds
+// nothing", and a home path would read like a real machine path in a scanner's report.
+const outside = await search.execute({ query: 'x' }, makeExec(process.platform === 'win32' ? 'C:/' : '/'))
 check('a cwd without a library reports it', String(outside.error ?? '').includes('skill-index.tsv'))
+// The missing-library error must point at something a reader of this repo actually has.
+// It used to name a scanner script that existed only in the author's workspace, so anyone
+// else following the message hit a file that was never there.
+check('the missing-library error points at the README', String(outside.error ?? '').includes('README'))
+check('the missing-library error names no private script', !String(outside.error ?? '').includes('scan-skills'))
 
 if (fixture !== undefined) {
   const { dropFixture } = await import('./helpers.mjs')
