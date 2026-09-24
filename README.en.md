@@ -326,6 +326,31 @@ Reads one file bundled with a skill, or lists what is bundled.
 
 The `referenceFiles` list from `skill_load` is usually enough to decide *whether* to read a file — this reads only that one instead of pulling the whole directory into context.
 
+## Skill usage tab (`conversation.view`)
+
+The plugin ships a Client half that adds a **技能 / Skills** tab to the conversation view ring — the row holding Chat, Trajectory, Approval and Context — listing what this session actually loaded:
+
+```
+技能调用清单
+共 5 次技能加载，涉及 3 个技能。
+
+1  验证·前置·完成     verification-before-completion   skill_load
+2  写作·规划           writing-plans                    skill
+3  供应链·风险审计     supply-chain-risk-auditor        skill_load
+```
+
+**Zero model tokens.** The tab's data comes entirely from the conversation itself: this seat hands the component `useChat`, whose `legacy.nodes` is the conversation the turn already holds, and skill calls are read straight out of it. There is **no Host RPC, no projection key and no network request**, and nothing enters the model's context — the plugin still never touches the network and never writes a file.
+
+**The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
+
+- what actually gets called is always the English name on the right; the Chinese form never leaves the render layer;
+- search still runs against the English text, and neither `SKILL.md` nor the index is **changed by a single byte**;
+- proper nouns (`azure`, `vercel`, `semgrep`, `figma`…) are left alone — the most frequent tokens in this library's names are `azure` (148) and `google` (44), and translating those only makes a name harder to recognise.
+
+The translation is a **glossary plus a proper-noun allow list**, not 872 hand-written pairs: phrases first (`best-practices` → 最佳实践), then single words (`troubleshooting` → 故障排查), with filler words (`and`, `from`, `the`) dropped.
+
+> **How the node shape was established.** The field paths come from probing a live session (183 nodes), not from inference: an assistant node carries `blocks`, a block is discriminated by **`kind`** (not `type`), and a skill call is `{ kind: 'tool-call', name, arguments }`. Three earlier guesses were all wrong — a `kind: 'tool-call'` node, `node.block.call`, and `conv.blocks`. `test/usage.mjs` copies the probe's output into its fixtures, and `test/client-half.mjs` **actually renders** the component inside `node:vm`.
+
 ## Engineering constraints
 
 **Why nothing is imported.** A previous version imported `defineTool` from `@deepseek-ai/dsh-tools`. Node resolves a bare specifier from the importing package first, so a stray dev shim in the package's own `node_modules` shadowed the real package, the author DSL (`output.schema: { type: 'json' }`) reached the registry uncompiled, and the **entire plugin tree failed to load**:
@@ -344,7 +369,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Sixteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Eighteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -361,6 +386,8 @@ Sixteen dependency-free scripts. They run against a real staged library when one
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
+| `usage.mjs` | the usage tab's data extraction: all three loading tools count, `skill_search` does not, `tool-result` nodes are not counted twice, JSON-string arguments parse, malformed input returns an empty list instead of throwing |
+| `client-half.mjs` | **actually renders** the tab inside `node:vm` with stubbed React/DOM/ctx: Chinese name and English original both appear, the counts are right, a missing `useChat` seat degrades; it also asserts the Client half imports no package, contains no `@deepseek-ai/*` and touches no `node:` builtin |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
@@ -371,9 +398,10 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `
 
 ```
 host.js                       the plugin: apply(), buildSkillRouterTools(), definePortableTool()
+client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         sixteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         eighteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
 .github/workflows/            CI: npm test on Linux and Windows, Node 20 / 22 / 24

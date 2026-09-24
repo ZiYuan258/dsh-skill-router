@@ -22,15 +22,20 @@ Stated as facts about the code, so the policy is checkable rather than aspiratio
 
 | Property | Status | How it is enforced |
 |---|---|---|
-| Executes code from a skill | **Never** | No `eval`, no `new Function`, no child process anywhere in `host.js` |
+| Executes code from a skill | **Never** | No `eval`, no `new Function`, no child process anywhere in `host.js` or `client.js` |
 | Runs a shell or any command | **Never** | No `ctx.shell`, no `subprocess`, no `bash` |
-| Makes network requests | **Never** | No `ctx.web`, no `fetch`, no HTTP client |
+| Makes network requests | **Never** | No `ctx.web`, no `fetch`, no HTTP client in either half |
 | Writes, deletes or renames anything | **Never** | The only `ctx.fs` calls are `resolve`, `stat`, `readText`, `listDir` |
 | Installs or removes skills | **Never** | It reports paths; installation is a separate `dsh plugin` / your script |
 | Sends data anywhere | **Never** | Nothing leaves the process; there is no telemetry |
 | Reads credentials or environment variables | **Never** | No `process.env` access; `process` is not even available in the dynamic-plugin sandbox |
+| Touches the page DOM | **Two calls, both reversible** | `client.js` does only `document.createElement('style')` and `document.head.appendChild` (removed again on unload). It queries and modifies no product-owned DOM node |
 
-In short: the plugin is a **read-only index lookup plus file reader**. Every risk it carries comes from *which files it reads* and *what the model then does with their contents*.
+In short: the plugin is a **read-only index lookup plus file reader**, with a read-only Client tab on top. Every risk it carries comes from *which files it reads* and *what the model then does with their contents*.
+
+### What the Client half reads
+
+The usage tab's **entire** input is the `useChat` seat the slot hands the component: it reads `legacy.nodes`, takes those whose `kind` is `assistant`, and from their `blocks` reads only the scalar leaves `kind`, `name` and `arguments` — enough to tell which tool ran and what the skill was called. It copies no node, serializes no node, and sends conversation content nowhere; **nothing reaches the model's context**. The Client half imports no package either (React is supplied by the host), so there is no supply chain to speak of.
 
 ## Untrusted content is the real boundary
 

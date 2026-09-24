@@ -332,6 +332,31 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 
 `skill_load` 返回的 `referenceFiles` 通常足以判断**要不要**读某个文件——这个工具让你只读那一个，而不是把整个目录塞进上下文。
 
+## 技能看板（`conversation.view` 的「技能」标签页）
+
+插件带一个客户端半，在**对话 / 轨迹 / 审批 / 上下文**那一栏加一个**技能**标签页，列出本会话真正加载过哪些技能：
+
+```
+技能调用清单
+共 5 次技能加载，涉及 3 个技能。
+
+1  验证·前置·完成     verification-before-completion   skill_load
+2  写作·规划           writing-plans                    skill
+3  供应链·风险审计     supply-chain-risk-auditor        skill_load
+```
+
+**零模型 token。** 标签页的数据全部来自会话本身：这个座位给组件 `useChat`，其 `legacy.nodes` 就是本轮已经持有的对话，技能调用直接从中读出。**没有宿主 RPC、没有投影键、没有网络请求**，也没有任何东西进入模型上下文——插件至今仍然是"从不联网、从不写文件"。
+
+**中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
+
+- 实际调用的永远是右侧的英文原名，中文形不离开渲染层；
+- 检索仍走英文原文，`SKILL.md` 与索引**一个字节都没改**；
+- 专名（`azure`、`vercel`、`semgrep`、`figma`…）保持原样——本库名字里最高频的 token 正是 `azure`(148)、`google`(44)，把它们译成中文只会更难认。
+
+翻译是**术语表 + 专名白名单**，不是 872 条整名对照表：短语优先（`best-practices` → 最佳实践），再退到单词（`troubleshooting` → 故障排查），虚词（`and`/`from`/`the`）直接丢弃。
+
+> **它是怎么知道节点形状的。** 字段路径来自对一次真实会话的探针（183 个节点），不是推断：助手节点带 `blocks`，块由 **`kind`** 区分（不是 `type`），技能调用是 `{ kind: 'tool-call', name, arguments }`。此前三个猜测全错——`kind: 'tool-call'` 的独立节点、`node.block.call`、`conv.blocks`。`test/usage.mjs` 的夹具照抄探针输出，`test/client-half.mjs` 则在 `node:vm` 里**真的渲染一次**组件。
+
 ## 工程约束
 
 **为什么零导入。** 早先版本从 `@deepseek-ai/dsh-tools` 引入 `defineTool`。Node 解析裸标识符时**先从发起包自己的 `node_modules` 找**，于是包里一个残留的开发用替身遮蔽了真包，作者 DSL（`output.schema: { type: 'json' }`）未经编译就进了注册表，结果**整棵插件树加载失败**：
@@ -350,7 +375,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十六个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十八个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -367,6 +392,8 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
+| `usage.mjs` | 技能看板的数据提取：三种加载工具都算、`skill_search` 不算、`tool-result` 节点不重复计、参数为 JSON 字符串时可解析、坏输入返回空数组而不抛 |
+| `client-half.mjs` | 在 `node:vm` 里用桩 React/DOM/ctx **真的渲染一次**标签页：中文名与英文原名都出现、计数正确、缺 `useChat` 座位时降级；并断言客户端半不 import 任何包、不出现 `@deepseek-ai/*`、不碰 `node:` 内建 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
 | `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
@@ -377,9 +404,10 @@ npm test
 
 ```
 host.js                       插件本体：apply()、buildSkillRouterTools()、definePortableTool()
+client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十六个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         十八个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）
 .github/workflows/            CI：Linux 与 Windows 上、Node 20 / 22 / 24 各跑一遍 npm test
