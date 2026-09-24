@@ -407,14 +407,36 @@ check('inject 收到的 sessionId 被用来取绑定', loaded.propsFor('session-
   const text = textOf(loaded.fake.render(loaded.Component, loaded.propsFor('s1')))
   check('标签页印出运行版本', /dsh-skill-router v\d+\.\d+\.\d+/.test(text), text.slice(-140))
   check('标签页印出翻页状态', /(已读完|读取中|无进展停止|超时停止|到上限停止|无读取入口|出错)/.test(text), text.slice(-140))
-  // 「尝试 0」+「读取中」= effect 压根没启动过；这是无法从外部区分的那类事实，所以它必须印出来。
-  check('标签页印出尝试/收尾计数（区分「没启动」与「启动了没收敛」）', /尝试 \d+\/收尾 \d+/.test(text), text.slice(-220))
-  check('标签页印出 effect/心跳计数', /effect \d+/.test(text) && /心跳 \d+/.test(text), text.slice(-220))
-  // 「可翻页」必须写在**结论那一行**：它是判读"翻页有没有入口"的唯一字段，不该埋在诊断里。
+  // 诊断计数**不再**出现在界面上：账本已被真机验证可用，留下的只有判读结论。
+  check('界面不再出现开发用诊断计数', /尝试 \d+\/收尾|effect \d|心跳 \d/.test(text) === false, text.slice(-200))
+  // 「可翻页」必须写在**结论那一行**：它是判读"翻页有没有入口"的唯一字段。
   const verdict = (loaded.fake.render(loaded.Component, loaded.propsFor('s1')).children || [])
     .map((child) => (child && child.props && child.props.className === 'sr-usage-ver' ? textOf(child) : ''))
     .join('')
   check('结论行写明是否可翻页', /可翻页 [是否]/.test(verdict), verdict)
+}
+
+// --- 1b. 「18 行 / 17 次调用」必须自我解释 ---------------------------------------
+// 真机反馈有一轮就卡在这个组合上：它是对的（一次调用点名多个技能，按技能名分行），但读起来像矛盾。
+// 现在表头自己说明，且只在两者确实不等时才出现。
+{
+  const multi = makeSource({
+    entries: [
+      entry(call('multi', 'skill_load', { names: 'gh-cli,code-review-and-quality' }, 10)),
+      entry(call('single', 'skill_load', { name: 'semgrep' }, 20)),
+    ],
+    hasMore: false,
+  })
+  const mounted = mount({ source: multi, session: multi.session })
+  const text = textOf(mounted.fake.render(mounted.Component, mounted.propsFor('s1')))
+  const plain = text.replace(/\s+/g, '')
+  check('一次调用点名多个技能时按技能名分行', plain.indexOf('共2次技能调用') >= 0, text.slice(0, 200))
+  check('表头解释行数与调用数为何不同', plain.indexOf('其中1次调用一次点名了多个技能') >= 0, text.slice(0, 240))
+
+  const single = makeSource({ entries: [entry(call('one', 'skill_load', { name: 'semgrep' }, 10))], hasMore: false })
+  const onlyOne = mount({ source: single, session: single.session })
+  const oneText = textOf(onlyOne.fake.render(onlyOne.Component, onlyOne.propsFor('s1')))
+  check('没有多名调用时不出现解释', oneText.indexOf('一次点名了多个技能') < 0, oneText.slice(0, 200))
 }
 
 // --- 2. 座位缺席：给一句话，绝不冒充「读了但没有」 ------------------------------

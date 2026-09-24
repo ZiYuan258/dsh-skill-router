@@ -521,8 +521,12 @@ window.__ModuleLoader__.load({
         completeness,
         hasMore: opts.hasMore === true,
         capped: opts.capped === true,
-        // Empty unless a call named more than one skill, in which case it names them.
+        // Empty unless a call named more than one skill, in which case it names them. Kept in the
+        // ledger because "18 rows against 17 calls" is legitimate and must be explainable rather
+        // than puzzling — a live report spent a whole round trip on exactly that question.
         multiNote,
+        // How many calls named more than one skill: the number the header explains with.
+        multiCalls: Object.keys(multi).filter((callId) => multi[callId].indexOf('|') >= 0).length,
         page: typeof opts.page === 'number' ? opts.page : 0,
         error: opts.error === undefined ? null : opts.error,
       }
@@ -692,7 +696,13 @@ window.__ModuleLoader__.load({
        * writing it can never re-enter an effect.
        */
       const [state, setState] = React.useState({ page: 0, startedAt: usable ? Date.now() : 0, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
-      const reading = state.startedAt !== 0 && Date.now() - state.startedAt < LOAD_OLDER_TIMEOUT_MS
+      // "Reading" is the deadline AND the window's own answer. The initial state is seeded as
+      // reading so the first paint never shows an unfinished count as if it were final — but when
+      // the very first snapshot already says `hasMore: false`, there is nothing to wait for, and
+      // saying "正在读取更早的记录…" until an effect clears it is a lie told for one frame. A test
+      // caught exactly that.
+      const firstWindow = usable ? windowOf(source.getSnapshot()) : { entries: [], hasMore: false }
+      const reading = state.startedAt !== 0 && Date.now() - state.startedAt < LOAD_OLDER_TIMEOUT_MS && firstWindow.hasMore === true
       DIAG.mounts += 1
       React.useEffect(
         () => () => {
@@ -934,7 +944,6 @@ window.__ModuleLoader__.load({
       '.sr-usage-empty{opacity:.75}',
       '.sr-usage-note{margin-top:14px;opacity:.6;font-size:11px}',
       '.sr-usage-ver{position:sticky;bottom:0;margin-top:10px;padding-top:6px;opacity:.35;font-size:10px;font-family:var(--dsh-font-mono,ui-monospace,monospace);border-top:1px solid rgba(127,127,127,.12)}',
-      '.sr-usage-diag{opacity:.22;font-size:10px;font-family:var(--dsh-font-mono,ui-monospace,monospace);word-break:break-all}',
     ].join('\n')
 
     // A Client bundle has no styles.insert (that is a dynamic-sandbox builtin), so the
@@ -983,10 +992,13 @@ window.__ModuleLoader__.load({
      */
     function summaryOf(ledger) {
       const head = '本会话已加载 ' + ledger.files.length + ' 个技能名（' + ledger.calls + ' 次调用，涉及 ' + ledger.uniqueSkills + ' 个技能）'
-      if (ledger.completeness === 'error') return head + '。'
-      if (ledger.completeness === 'loading') return head + '，正在读取更早的记录…'
-      if (ledger.completeness === 'partial') return head + '，更早的记录尚未读完。'
-      return '本会话共 ' + ledger.calls + ' 次技能调用，涉及 ' + ledger.uniqueSkills + ' 个技能。'
+      // "18 rows, 17 calls" is correct but reads like an inconsistency, so the header says why
+      // whenever the two differ: a call may name several skills, and each lands as its own row.
+      const multi = ledger.multiCalls > 0 ? '其中 ' + ledger.multiCalls + ' 次调用一次点名了多个技能，故按技能名分行列出；' : ''
+      if (ledger.completeness === 'error') return head + '。' + multi
+      if (ledger.completeness === 'loading') return head + '，正在读取更早的记录…' + multi
+      if (ledger.completeness === 'partial') return head + '，更早的记录尚未读完。' + multi
+      return '本会话共 ' + ledger.calls + ' 次技能调用，涉及 ' + ledger.uniqueSkills + ' 个技能。' + multi
     }
 
     function listOf(ledger) {
@@ -1051,7 +1063,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.8.3'
+    const VERSION = '1.9.0'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
@@ -1092,18 +1104,6 @@ window.__ModuleLoader__.load({
           'p',
           { className: 'sr-usage-ver' },
           'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut) + ' · 可翻页 ' + (diag.canPage === true ? '是' : '否'),
-        ),
-        // Diagnostics on their own line, dimmer than the verdict above it. They existed to answer
-        // "is the code even running", and they answered it; keeping them one line below means a
-        // report can quote the verdict without dragging the counters along.
-        React.createElement(
-          'p',
-          { className: 'sr-usage-diag' },
-          '尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
-            + ' · effect ' + String(diag.effectRuns)
-            + ' · 心跳 ' + String(diag.heartbeats)
-            + ' · 记录 ' + String(ledger.files.length) + ' 行/' + String(ledger.calls) + ' 次调用/' + String(ledger.uniqueSkills) + ' 个技能'
-            + (ledger.multiNote === '' ? '' : ' · 多名调用 ' + ledger.multiNote),
         ),
       )
     }
