@@ -30,6 +30,12 @@ v1.2.0 加它是为了解决当时真实存在的问题：`host.js` 在**已部�
 
 更要紧的是它的失败方式：默认目标是作者机器上的固定路径，那个目录不存在时 `npm run check:host` 直接退出 1。**一个开箱即坏的命令比没有这个命令更糟**——它会把"环境已变"伪装成"仓库有问题"。v1.2.0 的发布说明保留原样（那是历史记录），但工具本身不再随包发布。
 
+## 清理：action 升到 v7
+
+CI 日志每个 job 都在警告 `actions/checkout@v4` 与 `actions/setup-node@v4` 以 Node 20 为目标，而 GitHub 已强制它们跑在 Node 24 上。两个 action 都已有 v7（checkout 7.0.1、setup-node 7.0.0），本 workflow 用到的输入（`node-version` 与 checkout 的默认行为）没有变化。
+
+仍然**固定在主版本标签上，不用 `@main`**，`workflow-config.mjs` 继续强制这一点。升级后重跑三个矩阵腿，日志里 `deprecat` 一处不剩。
+
 ## 环境要求
 
 - DSH `>= 0.1.5-rc.1`（已验证下限）
@@ -70,6 +76,12 @@ The bilingual README examples use `<your-workspace>` / `D:\work` instead of the 
 v1.2.0 added it for a real problem at the time: `host.js` was being edited in two places at once — the deployed package and a dev checkout — and diverged silently. That dev checkout is gone, the package is the single source of truth, and the tool lost its reason to exist.
 
 Its failure mode matters more: it defaulted to a fixed path on the author's machine, so with that directory absent `npm run check:host` exited 1. **A command that is broken out of the box is worse than no command** — it disguises "the environment moved" as "the repo is wrong". The v1.2.0 release notes stand as written (they are a historical record); the tool itself no longer ships.
+
+### Cleanup: actions bumped to v7
+
+Every job in the CI log warned that `actions/checkout@v4` and `actions/setup-node@v4` target Node 20, which GitHub now force-runs on Node 24. Both actions ship v7 (checkout 7.0.1, setup-node 7.0.0); the inputs this workflow uses — `node-version`, and checkout's defaults — are unchanged.
+
+They stay **pinned to a major-version tag, never `@main`**, and `workflow-config.mjs` keeps enforcing that. After the bump all three matrix legs were re-run: not one `deprecat` match left in the log.
 
 ### Requirements
 
