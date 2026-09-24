@@ -105,6 +105,25 @@ window.__ModuleLoader__.load({
     const slots = ctx.get('slots')
     if (slots === undefined) return
 
+    /**
+     * Diagnostics that outlive any single component instance, on purpose.
+     *
+     * A tab that is REMOUNTED on every parent render would reset every deadline, every ref and
+     * every counter inside the hook: the 4-second expiry would never be reached because the local
+     * clock keeps restarting, and "尝试 0" would appear beside "读取中" for the same reason. That is
+     * one of the few remaining explanations for two live reports of a never-resolving state on
+     * current code, and it is indistinguishable from "the effect never ran" using per-instance
+     * counters alone.
+     *
+     * These live in `apply`'s scope — once per plugin, not once per mount — so a remount storm is
+     * visible as a mounting count that keeps climbing while the per-instance counters stay at zero.
+     *
+     * Nothing here changes behaviour. Instrumentation first, fixes after: four fixes in a row were
+     * proposed from inference, and the evidence this tab prints is what finally made the difference
+     * between "the code is wrong" and "I cannot tell what the code did".
+     */
+    const DIAG = { mounts: 0, effectRuns: 0, heartbeats: 0 }
+
     // ── skill name rendering ────────────────────────────────────────────────────
     // `name` is the match key for skill_load, the library index and the /skill command,
     // so the Chinese form below is DISPLAY ONLY: it must never travel back into a call,
@@ -622,6 +641,8 @@ window.__ModuleLoader__.load({
        */
       const [state, setState] = React.useState({ page: 0, startedAt: usable ? Date.now() : 0, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
       const reading = state.startedAt !== 0 && Date.now() - state.startedAt < LOAD_OLDER_TIMEOUT_MS
+      DIAG.mounts += 1
+      const mountIdRef = React.useRef(DIAG.mounts)
       React.useEffect(
         () => () => {
           unmountedRef.current = true
@@ -645,6 +666,7 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (reading === false) return undefined
         const timer = setInterval(() => {
+          DIAG.heartbeats += 1
           if (unmountedRef.current === true) return
           setState((prev) => (prev.startedAt === 0 ? prev : { page: prev.page, startedAt: Date.now() - LOAD_OLDER_TIMEOUT_MS, stalled: true, timedOut: true, error: prev.error, tick: prev.tick + 1 }))
         }, LOAD_OLDER_TIMEOUT_MS)
@@ -699,6 +721,7 @@ window.__ModuleLoader__.load({
       // long before the doubling can show.
       React.useEffect(() => {
         if (usable === false || typeof source.loadOlder !== 'function') return undefined
+        DIAG.effectRuns += 1
         if (gaveUpRef.current === true) return undefined
         const before = windowOf(source.getSnapshot())
         // The largest window seen so far, remembered across retries. Comparing against the
@@ -830,6 +853,12 @@ window.__ModuleLoader__.load({
         // means the paging effect never started — which is a fact about the runtime, not a guess.
         attempts: attemptsRef.current,
         concludes: concludesRef.current,
+        // Module-lifetime: they keep counting across remounts, so a remount storm shows up as
+        // `mounts` climbing while the per-instance counters stay at zero.
+        mounts: DIAG.mounts,
+        mountId: mountIdRef.current,
+        effectRuns: DIAG.effectRuns,
+        heartbeats: DIAG.heartbeats,
       }
     }
 
@@ -958,10 +987,11 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.7.1'
+    const VERSION = '1.7.2'
 
     function UsageView(props) {
-      const { ledger, usable, absent, timedOut, attempts, concludes } = useUsageLedger(props)
+      const diag = useUsageLedger(props)
+      const { ledger, usable, absent, timedOut } = diag
 
       // No ledger to read: say that, and say ONLY that. The summary and coverage lines below
       // are statements about data that was read, so printing them here would turn "I could not
@@ -997,7 +1027,12 @@ window.__ModuleLoader__.load({
         React.createElement(
           'p',
           { className: 'sr-usage-ver' },
-          'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut) + ' · 尝试 ' + String(attempts) + '/收尾 ' + String(concludes),
+          'dsh-skill-router v' + VERSION
+            + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut)
+            + ' · 尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
+            + ' · 挂载 ' + String(diag.mounts) + '(#' + String(diag.mountId) + ')'
+            + ' · effect ' + String(diag.effectRuns)
+            + ' · 心跳 ' + String(diag.heartbeats),
         ),
       )
     }
