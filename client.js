@@ -21,27 +21,54 @@
 // `test/client-half.mjs` pins this one's shape.
 
 /**
- * How the plugin object is handed over — a top-level `module.exports` assignment.
+ * How this file is loaded — and the two ways that went wrong.
  *
- * NOT a top-level `return`. Every shipped Client half in this harness assigns
- * `module.exports`, and the reason is structural: the browser loads all of them as ONE
- * concatenated classic script (`<script src="/plugins/??a/client.js,b/client.js">`), where a
- * bare top-level `return` is a **SyntaxError**. A single such statement takes the whole
- * bundle down, so no client half registers at all — including the HMR client that reports
- * the failure, which is exactly what a boot failure looked like:
+ * The browser fetches every Client half as ONE concatenated classic script:
  *
- *   bundle /plugins/??…,dsh-skill-router/client.js… loaded without registering
- *   "@deepseek-ai/dsh-client-hmr" via __ModuleLoader__.load
+ *   <script src="/plugins/??a/client.js,dsh-skill-router/client.js,…">
  *
- * A bare `return` is how a *dynamic* Package's `code.client` works — that half really is a
- * function body. Two different seams. This file used to confuse them, and the test meant to
- * catch it wrapped the source in a function, validating the fiction instead of the loader.
- * `test/client-half.mjs` now compiles this file as a classic script, which is the check that
- * would have failed.
+ * The bundler inserts each file's content verbatim. There is no per-file wrapper, so the
+ * file itself must register:
+ *
+ *   1. `window.__ModuleLoader__.load({ id, factory })` — the registration call. Without it
+ *      the bundle runs fine, nothing rings up, and the failure is reported as
+ *      "loaded without registering <id>". `__ModuleLoader__.load` only QUEUES; the factory
+ *      runs later in `create()`, which is what makes `require` available.
+ *   2. Inside the factory, `factory(require)` supplies `require`, so React is reached with
+ *      `require('react')` — a bare `React` global does not exist here.
+ *
+ * Two earlier versions of this file got one of those wrong each:
+ *
+ *   - a top-level `return` (v1.6.0). In a classic script that is a SyntaxError, and one such
+ *     statement fails the WHOLE bundle, so every Client half went unregistered — including
+ *     the HMR client that reports the failure, which is how the boot failure surfaced.
+ *   - a bare top-level `module.exports` (v1.6.1). That fixes the syntax error but still never
+ *     registers: the assignment populates a local `module` that nothing reads. Startup was
+ *     clean and the tab silently did not exist.
+ *
+ * The shape below matches what every shipped Client half in this harness uses (dsh-context,
+ * cost meter, skill center). `test/client-half.mjs` instruments `window.__ModuleLoader__` and
+ * materializes the factory the way `create()` does, because a test that loads this file any
+ * other way is testing a seam that does not exist — which is exactly how both failures got
+ * past review.
  */
-module.exports = {
-  name: 'dsh-skill-router-client',
-  apply(ctx) {
+window.__ModuleLoader__.load({
+  id: 'dsh-skill-router',
+  factory: (require) => {
+    var module = { exports: {} }
+    var exports = module.exports
+    const React = require('react')
+
+    module.exports = {
+      name: 'dsh-skill-router-client',
+      // The Client runner activates the services a plugin declares, per plugin — it is not
+      // global. Without this line `ctx.get('slots')` below returns undefined, apply returns
+      // early, and the tab is never registered, with nothing but a console line to show for
+      // it. dsh-context declares ["slots", "locale"] for the same reason; this half needs
+      // only `slots`, because its Chinese names are a static glossary rather than a locale
+      // dictionary.
+      inject: ['slots'],
+      apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
 
@@ -392,3 +419,6 @@ module.exports = {
     )
   },
 }
+    return module.exports
+  },
+})
