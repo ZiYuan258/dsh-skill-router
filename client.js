@@ -471,6 +471,25 @@ window.__ModuleLoader__.load({
       for (let i = 0; i < files.length; i += 1) byCall[files[i].callId] = true
       const calls = Object.keys(byCall).length
 
+      // When one call produced more than one row, name WHICH one and what it named.
+      //
+      // A live report showed `18 行/17 次调用` — legitimate on its face, since one call may name
+      // several skills, but nothing in the row list looked like such a call, and the only way to
+      // find out was to keep asking. Now that `calls` is derived, any disagreement PROVES a
+      // multi-name call exists, so the ledger can name it: `callId[skill|skill]`. Print the
+      // evidence rather than the question.
+      const multi = {}
+      if (files.length > calls) {
+        for (let i = 0; i < files.length; i += 1) {
+          const file = files[i]
+          multi[file.callId] = multi[file.callId] === undefined ? file.skill : multi[file.callId] + '|' + file.skill
+        }
+      }
+      const multiNote = Object.keys(multi)
+        .filter((callId) => multi[callId].indexOf('|') >= 0)
+        .map((callId) => callId + '[' + multi[callId] + ']')
+        .join(' ')
+
       // `hasMore` is true on the newest page, so "complete" cannot be assumed from a full
       // window — it is only ever reached by paging to the start.
       //
@@ -502,6 +521,8 @@ window.__ModuleLoader__.load({
         completeness,
         hasMore: opts.hasMore === true,
         capped: opts.capped === true,
+        // Empty unless a call named more than one skill, in which case it names them.
+        multiNote,
         page: typeof opts.page === 'number' ? opts.page : 0,
         error: opts.error === undefined ? null : opts.error,
       }
@@ -1030,7 +1051,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.8.2'
+    const VERSION = '1.8.3'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
@@ -1081,7 +1102,8 @@ window.__ModuleLoader__.load({
           '尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
             + ' · effect ' + String(diag.effectRuns)
             + ' · 心跳 ' + String(diag.heartbeats)
-            + ' · 记录 ' + String(ledger.files.length) + ' 行/' + String(ledger.calls) + ' 次调用/' + String(ledger.uniqueSkills) + ' 个技能',
+            + ' · 记录 ' + String(ledger.files.length) + ' 行/' + String(ledger.calls) + ' 次调用/' + String(ledger.uniqueSkills) + ' 个技能'
+            + (ledger.multiNote === '' ? '' : ' · 多名调用 ' + ledger.multiNote),
         ),
       )
     }
