@@ -484,8 +484,12 @@ window.__ModuleLoader__.load({
      * a fake source that counts `loadOlder` calls.
      */
     const LOAD_OLDER_CAP = 200
-    // How long one page request may take before it is treated as no answer at all.
-    const LOAD_OLDER_TIMEOUT_MS = 8000
+    // How long one page request may take before it is treated as no answer at all. Four seconds,
+    // not eight: while this is pending the tab says "正在读取更早的记录…", and a watchdog generous
+    // enough to outlast a reader's patience turns every check of "did the fix land?" into a coin
+    // flip. Debugging this fix over chat made that concrete — two reports in a row were taken
+    // inside the old window and looked exactly like the bug they were verifying.
+    const LOAD_OLDER_TIMEOUT_MS = 4000
     // How many consecutive requests that change nothing before paging gives up for good.
     //
     // This is the fix for the live stall, and the reason is worth keeping: the real
@@ -766,6 +770,7 @@ window.__ModuleLoader__.load({
       '.sr-usage-when{opacity:.5;font-size:11px;margin-left:auto}',
       '.sr-usage-empty{opacity:.75}',
       '.sr-usage-note{margin-top:14px;opacity:.6;font-size:11px}',
+      '.sr-usage-ver{position:sticky;bottom:0;margin-top:10px;padding-top:6px;opacity:.35;font-size:10px;font-family:var(--dsh-font-mono,ui-monospace,monospace);border-top:1px solid rgba(127,127,127,.12)}',
     ].join('\n')
 
     // A Client bundle has no styles.insert (that is a dynamic-sandbox builtin), so the
@@ -854,7 +859,31 @@ window.__ModuleLoader__.load({
       return '已读到第 ' + ledger.page + ' 页更早的记录，之后不再继续读取——上面的数字只是这部分的。'
     }
 
-    const NOTE = '中文名仅用于显示。技能名是 skill_load、索引检索与 /skill 命令的匹配键，实际调用的始终是英文原名；检索仍走英文原文，SKILL.md 未被修改。'
+    const NOTE = '中文名仅用于显示。技能名是 skill_load、索引检索和 /skill 命令的匹配键，实际调用的始终是英文原名；检索仍走英文原文，SKILL.md 未被修改。'
+
+    /** The paging state as one machine-readable word, for the version line. */
+    function coverageStateOf(ledger, timedOut) {
+      if (ledger.completeness === 'complete') return '已读完'
+      if (ledger.completeness === 'error') return '出错'
+      if (ledger.completeness === 'loading') return '读取中'
+      if (timedOut === true) return '超时停止'
+      return ledger.page === 0 ? '无进展停止' : '到上限停止'
+    }
+
+    /**
+     * Which build this is, printed in the tab.
+     *
+     * A browser bundle is served with `cache-control: public, max-age=31536000, immutable`, so
+     * "did my change actually reach the page?" is a real question with no answer visible from the
+     * outside — this file cannot be imported by a Node test and the served bytes sit behind the
+     * Desktop renderer's capability check. Debugging exactly that over chat cost several rounds of
+     * "still stuck", each of which was really "still the old build".
+     *
+     * So the version is stated in the UI. It MUST match package.json, and
+     * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
+     * label at all.
+     */
+    const VERSION = '1.6.9'
 
     function UsageView(props) {
       const { ledger, usable, absent, timedOut } = useUsageLedger(props)
@@ -870,6 +899,7 @@ window.__ModuleLoader__.load({
           React.createElement('h3', null, '技能调用清单'),
           React.createElement('p', { className: 'sr-usage-sum' }, absent === null ? '这个会话没有可用的技能记录。' : absent),
           React.createElement('p', { className: 'sr-usage-note' }, '技能调用记录来自会话账本 eventSource；读不到它时这里无法给出清单。'),
+          React.createElement('p', { className: 'sr-usage-ver' }, 'dsh-skill-router v' + VERSION + ' · 账本不可用'),
         )
       }
 
@@ -889,6 +919,11 @@ window.__ModuleLoader__.load({
         ledger.files.length === 0 ? null : React.createElement('div', null, listOf(ledger)),
         React.createElement('p', { className: 'sr-usage-note' }, coverageOf(ledger, timedOut)),
         React.createElement('p', { className: 'sr-usage-note' }, NOTE),
+        React.createElement(
+          'p',
+          { className: 'sr-usage-ver' },
+          'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut),
+        ),
       )
     }
 

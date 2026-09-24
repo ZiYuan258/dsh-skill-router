@@ -71,6 +71,13 @@ ok('没有顶层 import/export', /^\s*(import|export)\b/m.test(clientCode) === f
 ok('不引用任何 @deepseek-ai/* 包', clientCode.includes('@deepseek-ai/') === false)
 ok('不碰 node: 内建', /node:[a-z/]+/.test(clientCode) === false)
 
+// 标签页会把版本号印在界面上，用来回答"浏览器跑的是哪一版"——bundle 带 immutable 缓存，而这个
+// 文件既不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"改动到底有没有
+// 到页面"曾是无法回答的问题，代价是好几轮"还是卡住"（其实都是旧构建）。
+// 标签能漂移就比没有标签更糟，所以这里把两者钉在一起。
+const clientVersion = (clientCode.match(/const VERSION\s*=\s*'([^']+)'/) || [])[1]
+ok('client.js 里印的版本与 package.json 一致', clientVersion === manifest.version, 'client=' + String(clientVersion) + ' package=' + String(manifest.version))
+
 console.log('')
 console.log('=== host.js 的宿主契约 ===')
 const hostSource = readFileSync(hostFile, 'utf8')

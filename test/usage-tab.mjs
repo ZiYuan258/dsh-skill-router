@@ -352,6 +352,13 @@ check('外层是 keyed 包装（会话切换要重挂 hook 状态）', loaded.Co
 // 这一条是关键：没有 inject 就没有 source，标签页在真实会话里永远是空的。
 check('注册项声明了 inject（会话作用域靠它把账本交进来）', typeof loaded.meta.inject === 'function', typeof loaded.meta.inject)
 check('inject 收到的 sessionId 被用来取绑定', loaded.propsFor('session-abc').source !== undefined && loaded.bindingCalls.includes('session-abc'), 'binding(' + JSON.stringify(loaded.bindingCalls) + ')')
+// 「浏览器跑的是哪一版」必须能从界面上读出来：bundle 带 immutable 缓存、这个文件不能被 Node 测试
+// import、服务端字节又挡在 Desktop 的能力校验后面，所以它曾是唯一无法回答的问题。
+{
+  const text = textOf(loaded.fake.render(loaded.Component, loaded.propsFor('s1')))
+  check('标签页印出运行版本', /dsh-skill-router v\d+\.\d+\.\d+/.test(text), text.slice(-140))
+  check('标签页印出翻页状态', /(已读完|读取中|无进展停止|超时停止|到上限停止|出错)/.test(text), text.slice(-140))
+}
 
 // --- 2. 座位缺席：给一句话，绝不冒充「读了但没有」 ------------------------------
 for (const seat of ['no-service', 'no-binding', 'no-source']) {
