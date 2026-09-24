@@ -350,7 +350,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十五个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十六个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -363,6 +363,7 @@ npm test
 | `robustness.mjs` | 部分匹配降级、`explain` 的分数构成、`whenToUse`、两种截断边界 |
 | `skill-ref.mjs` | 路径包含性（含 `../` 越界尝试）、列目录、文件缺失 |
 | `index-format.mjs` | 索引格式契约：6 列与 7 列都可解析、表头按形状识别、真库仍可用 |
+| `index-header.mjs` | 表头的五种写法（带引号/不带引号/带 BOM/两者兼有/LF 换行）都**不会**变成一条名为 `name` 的技能 |
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
@@ -378,7 +379,7 @@ npm test
 host.js                       插件本体：apply()、buildSkillRouterTools()、definePortableTool()
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十五个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         十六个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）
 .github/workflows/            CI：Linux 与 Windows 上、Node 20 / 22 / 24 各跑一遍 npm test

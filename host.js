@@ -256,17 +256,29 @@ function cleanDescription(value) {
   return text.trim()
 }
 
-/** skill-index.tsv — rows. Header is `repo  relpath  name  description  files  KB`. */
+/**
+ * `skill-index.tsv` — rows. Header is `repo  relpath  name  description  files  KB`.
+ *
+ * A byte-order mark on the first line used to turn the header into a data row, because the
+ * mark glues itself to the first field: `repo === 'repo'` compared against `\uFEFF"repo"`
+ * and never matched. The result was a skill literally named `name`, living at
+ * `\uFEFF"repo/relpath/SKILL.md`, which search would happily return and load would then
+ * report as missing. BOM-prefixed UTF-8 is what several Windows writers produce — including
+ * PowerShell's `Export-Csv` — so this is the normal case, not a corner one.
+ */
 function parseIndex(text) {
   const rows = []
   for (const line of splitLines(text)) {
     if (line === '') continue
     const fields = splitFields(line)
-    const repo = fields[0] ?? ''
-    const relpath = (fields[1] ?? '').replace(/\\/g, '/')
-    const name = fields[2] ?? ''
-    // Skip the header by shape, not by an exact string: the column names may or
-    // may not be quoted depending on which writer produced the file.
+    // Strip a leading BOM and any stray wrapping quotes before reading the row: the column
+    // names may or may not be quoted depending on which writer produced the file.
+    const cell = (index) => String(fields[index] ?? '').replace(/^\uFEFF/, '').replace(/^"|"$/g, '').trim()
+    const repo = cell(0)
+    const relpath = cell(1).replace(/\\/g, '/')
+    const name = cell(2)
+    // Skip the header by shape, not by an exact string, so a quoted, unquoted or BOM-
+    // prefixed header all read the same.
     if (repo === 'repo' && name === 'name') continue
     if (name === '' || relpath === '') continue
     rows.push({
@@ -274,7 +286,7 @@ function parseIndex(text) {
       repo,
       relpath,
       description: cleanDescription(fields[3]),
-      files: fields[4] ?? '',
+      files: cell(4),
       // Optional 7th column. A skill may carry a `whenToUse` frontmatter field, which
       // upstream libraries usually leave empty (in the library this was developed against,
       // 0 of 1025 rows), so its absence must stay a normal case rather than a parse error.
