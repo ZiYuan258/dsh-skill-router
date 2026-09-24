@@ -343,7 +343,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.10.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -392,7 +392,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.10.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -403,6 +403,46 @@ the window grew                          <- secondary: a live append can grow it
 The translation is a **glossary plus a proper-noun allow list**, not 872 hand-written pairs: phrases first (`best-practices` → 最佳实践), then single words (`troubleshooting` → 故障排查), with filler words (`and`, `from`, `the`) dropped.
 
 > **This tab used to be empty, and the reason is worth keeping.** It read the wrong source four times: a guessed node shape; per-turn tool **declarations** from request headers (counting skills merely *offered* to the model as loaded); `useChat().legacy.nodes` (measured at one instant: 210 nodes with **zero tool calls**, against a ledger holding 2,778+ events); and paging written against `source.loadOlder`, which lives on the `session` — so the guard returned on the first line every time and **four "fixes" changed a code path that never executed**. None of the four crashed and all four rendered a plausible list, which is exactly why the data contract had to be measured rather than inferred. The retrospective is in `docs/release-notes-v1.8.0.md`.
+
+## Task-aware skill discovery (**currently a dry run: it measures, it does not inject**)
+
+The three tools above solve "there are many skills — how does the agent find one". They do not solve the other half:
+
+> **Will the agent think to look at all?**
+
+A library skill is invisible to the model, so using one requires the model to *first* remember that searching is possible. If the user says "run a Semgrep security audit" and the model decides to just answer, `skill_search` never happens. This layer exists for that gap.
+
+It hooks `agent/pre-step` — DSH's waterfall that runs before a request is assembled — and at **step 1 of a turn** ranks the library for the incoming task, **locally, with zero model calls**:
+
+```
+the user task (step 1 only)
+   ↓
+the same tokenizer and the same scoreRow used by skill_search (weights live in one place)
+   ↓
+but NOT that tool's query policy: no strict AND, no all-but-one rescue
+   ↓
+top 5, or an explicit "nothing"
+```
+
+**Why the scorer is shared and the query semantics are not.** `skill_search`'s strict AND is built for a short query written by a model; a task is prose, and "分析这个 React 项目的性能问题" has no interpretation under strict AND — which would make this layer fail silently. So the difference stays in the caller and the weights stay in one function.
+
+**This version injects nothing.** It appends one line of telemetry to `~/.dsh/skill-router/discovery.jsonl` and returns the decision untouched. What it measures is what only real data can answer: how often a candidate is meaningful, how often it is wrong, and how often there is nothing at all.
+
+```json
+{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":2,"elapsedMs":11,
+ "candidateCount":1,"candidates":[{"name":"semgrep","score":210,"matched":3,"nameHits":1,"fields":["name","whenToUse"]}],"injected":false}
+```
+
+**The raw task text is never written** — only match counts, candidate names and scores. A feature that observes the router should not also start accumulating session content. The log is byte-capped and rotates, so leaving it on for weeks cannot grow without limit.
+
+`tier` is the reading that matters at this stage: **HIGH** (a name hit and at least two distinct tokens landing), **MEDIUM** (description-only, or a single weak keyword), **NONE** (not enough signal, or too close to the runner-up). Thresholds get chosen from a few days of data, not from intuition.
+
+**Two known boundaries, deliberately not fixed yet — measuring them is the point of a dry run:**
+
+- **The index matches Latin script only.** The tokenizer is `[^a-z0-9+#._-]`, so a Chinese task ("帮我做一次安全审计") yields zero keywords. That is a property of the index rather than a bug to paper over: such tasks are recorded as `reason: "no-searchable-token"`, and the dry run will say what share of traffic they are. If that share is high, aliases or a bilingual `whenToUse` are the next conversation — **not embeddings, not now**.
+- **`reason` separates "nothing matched" from "no library"** (`no-library`), so a broken index cannot masquerade as a quiet, well-behaved router.
+
+When injection is switched on it will change in exactly one place, and that place has already been verified: the hint goes into `decision.messages`, **not** through `agent.inject()`. `preStep` calls `inbox.claim()` *before* dispatching the waterfall, so anything injected lands in `next-step` and is only claimed at the **next** step — while this layer has to work on the first one. `decision.messages` is the authoritative batch for the current step (and becomes the session's `user/message`).
 
 
 ## Engineering constraints
@@ -423,7 +463,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Twenty-one dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Twenty-two dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -440,6 +480,7 @@ Twenty-one dependency-free scripts. They run against a real staged library when 
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
+| `discovery-dry-run.mjs` | the discovery dry run, which **really calls `apply(ctx)` and drives `agent/pre-step` the way the agent loop does**: three tools plus the listener register, the decision is left untouched, telemetry is written, only step 1 is recorded, a Chinese task records `no-searchable-token`, a `reject` passes through, and **no user text appears in the telemetry** |
 | `usage-ledger.mjs` | the ledger's pure logic (59 assertions), with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one event counts once across pages, **two different events sharing one `callId` still count as two**, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, **ordering follows `seq` (the session's order, not the arrival's)**, **the row/call relationship holds structurally** (`calls ≤ rows`, equality exactly when no call named several skills), and malformed input returns an empty ledger instead of throwing |
 | `usage-tab.mjs` | the tab's wiring (87 assertions), taking the component through the **same load path the browser uses** and rendering it: the registration contract, both `inject` arguments, three "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, **the oldest record staying listed after the window evicts it**, **a parent re-render never stalling the paging**, **"reading" expiring on a deadline**, **a row/call difference explaining itself**, and no developer diagnostics left in the UI |
 | `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declarations, and proves `apply()` survives four document timings; it also **scans for and rejects** the falsified data contracts returning (`legacy.nodes`, `useChat`, counting tool declarations as usage, **paging against `source.loadOlder` instead of `session.loadOlder`**) |
@@ -462,7 +503,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         twenty-one runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         twenty-two runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

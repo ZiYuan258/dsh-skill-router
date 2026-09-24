@@ -350,11 +350,188 @@ function tokenize(query) {
   return meaningful.length > 0 ? meaningful : tokens
 }
 
+/**
+ * Field weights, in one place because two callers rank with them.
+ *
+ * `name` beats `whenToUse` because a name hit is the thing itself; `whenToUse` beats
+ * `description` because trigger phrasing says more about *intent* than prose does; `path`
+ * is a weak tiebreaker. An exact name match short-circuits the lot.
+ */
+const WEIGHT = { name: 100, whenToUse: 40, description: 24, path: 6, exactName: 400 }
+
+/**
+ * Score one index row against a token list.
+ *
+ * Pure, and deliberately free of any query POLICY: whether a partial match is acceptable, and
+ * what to do when nothing matches everything, belongs to the caller. `skill_search` runs it
+ * twice (strict AND, then the all-but-one rescue); the discovery layer runs it once with
+ * `requireAll: false` — see `discoverRows` for why that difference is not a detail.
+ *
+ * @param row - one parsed index row.
+ * @param context - `{ tokens, requireAll, explaining, exactText }`.
+ * @returns the scored hit, or `undefined` when `requireAll` is set and a token missed.
+ */
+function scoreRow(row, context) {
+  const ctx = context === null || context === undefined ? {} : context
+  const tokens = Array.isArray(ctx.tokens) ? ctx.tokens : []
+  const requireAll = ctx.requireAll === true
+  const explaining = ctx.explaining === true
+  const nameText = String(row.name ?? '').toLowerCase()
+  const descText = String(row.description ?? '').toLowerCase()
+  // `whenToUse` is optional in the index; an absent one must not match every token.
+  const whenRaw = row.whenToUse === null || row.whenToUse === undefined ? '' : String(row.whenToUse)
+  const whenText = whenRaw.toLowerCase()
+  const pathText = String(row.repo ?? '') + '/' + String(row.relpath ?? '')
+  const lowerPath = pathText.toLowerCase()
+
+  let score = 0
+  let nameHits = 0
+  let matchCount = 0
+  const why = explaining ? [] : undefined
+  for (const token of tokens) {
+    let part = 0
+    const fields = []
+    if (nameText.includes(token)) {
+      part += WEIGHT.name
+      nameHits += 1
+      fields.push('name')
+    }
+    if (descText.includes(token)) {
+      part += WEIGHT.description
+      fields.push('description')
+    }
+    if (whenText !== '' && whenText.includes(token)) {
+      part += WEIGHT.whenToUse
+      fields.push('whenToUse')
+    }
+    if (lowerPath.includes(token)) {
+      part += WEIGHT.path
+      fields.push('path')
+    }
+    if (part === 0) {
+      if (requireAll) return undefined
+      if (why !== undefined) why.push(token + ': -')
+      continue
+    }
+    matchCount += 1
+    score += part
+    if (why !== undefined) why.push(token + ': +' + String(part) + ' (' + fields.join('+') + ')')
+  }
+  const exact = String(ctx.exactText ?? '').trim().toLowerCase() !== '' && nameText === String(ctx.exactText).trim().toLowerCase()
+  if (exact) score += WEIGHT.exactName
+  if (why !== undefined && exact) why.push('exact name: +' + String(WEIGHT.exactName))
+  return { row, score, matchCount, nameHits, why, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
+}
+
 /** Shorten one display line (search hit descriptions). Silent by design: this is presentation. */
 function truncate(text, max) {
   return text.length <= max ? text : text.slice(0, max - 1) + '\u2026'
 }
 
+// ── discovery: cheap, local, and deliberately NOT a search ───────────────────────────────
+//
+// The problem this exists for: a library skill is invisible to the model, so using one requires
+// the model to first THINK of searching. That is a trigger problem, not a retrieval problem, and
+// it is the gap between "the agent can find a skill" and "the agent always considers one".
+//
+// So discovery answers a weaker question than `skill_search` does — not "which skill matches
+// this query" but "which few names are worth the agent's attention here" — and it is allowed to
+// be wrong in the direction of saying nothing.
+//
+// Two properties are load-bearing:
+//
+//   * It NEVER loads anything. Choosing stays with the agent; a discovery that pre-empted the
+//     choice would be the "router replaces the agent" shape this repository exists to avoid.
+//   * It shares `scoreRow` with `skill_search` and shares NOTHING of that tool's query policy.
+//     `skill_search` demands every token, then rescues with all-but-one, then refuses a "weak"
+//     rescue — correct for a short model-written query, and fatal for a task sentence. A task is
+//     prose: "分析这个 React 项目的性能问题" has no interpretation under strict AND.
+
+/** How many candidate names discovery may offer. Five is about a line of text, not a list. */
+const DISCOVERY_LIMIT = 5
+/** Below this, a row is not a candidate — one `path` fragment (+6) must not earn a mention. */
+const DISCOVERY_MIN_SCORE = 24
+/** A task sentence longer than this gets truncated to its first tokens, in order. */
+const DISCOVERY_MAX_TOKENS = 12
+/**
+ * Independent tokens required for the top tier. One lucky word matching one `whenToUse` line is
+ * a coincidence; two different words landing is a signal.
+ */
+const DISCOVERY_STRONG_MATCHES = 2
+
+/**
+ * Rank index rows for a task sentence. Pure — no I/O, no clock, no telemetry.
+ *
+ * @param rows - parsed index rows.
+ * @param taskText - the raw user task; may be any language.
+ * @param limit - maximum candidates.
+ * @returns `{ candidates, tokens, tier, reason }`. `reason` is a code, never user text.
+ */
+export function discoverRows(rows, taskText, limit) {
+  const capped = typeof limit === 'number' && limit > 0 ? limit : DISCOVERY_LIMIT
+  const list = Array.isArray(rows) ? rows : []
+  // `tokenize` is the same tokenizer the search tool uses — the index is one Latin-script
+  // token set, and inventing a second one would let the two disagree about what a keyword is.
+  const all = tokenize(taskText)
+  const tokens = all.slice(0, DISCOVERY_MAX_TOKENS)
+  // A Chinese or Japanese task yields no tokens at all, because the index is matched on Latin
+  // script. That is a property of the index, not a bug to paper over: report the code and let
+  // the dry run measure how often it happens.
+  if (tokens.length === 0) return { candidates: [], tokens: [], tier: 'NONE', reason: 'no-searchable-token' }
+
+  const hits = []
+  for (const row of list) {
+    const scored = scoreRow(row, { tokens, requireAll: false, explaining: false, exactText: taskText })
+    if (scored === undefined || scored.score < DISCOVERY_MIN_SCORE) continue
+    hits.push(scored)
+  }
+  if (hits.length === 0) return { candidates: [], tokens, tier: 'NONE', reason: 'no-candidate' }
+
+  // Deterministic: score, then how many tokens landed, then how many hit the name, then the
+  // name — so the same task always yields the same list, which the dry run depends on.
+  hits.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+    if (b.nameHits !== a.nameHits) return b.nameHits - a.nameHits
+    return String(a.row.name).localeCompare(String(b.row.name))
+  })
+
+  const candidates = hits.slice(0, capped).map((hit) => ({
+    name: String(hit.row.name),
+    repo: String(hit.row.repo),
+    relpath: String(hit.row.relpath),
+    score: hit.score,
+    matched: hit.matchCount,
+    nameHits: hit.nameHits,
+    // WHICH fields matched, not why the agent should care — names only, no prose, because the
+    // injection budget is the whole point (measured: five names plus a hint is ~142 bytes).
+    fields: matchedFields(hit.row, tokens),
+  }))
+
+  const best = hits[0]
+  const runnerUp = hits[1]
+  let tier = 'MEDIUM'
+  if (best.nameHits > 0 && best.matchCount >= DISCOVERY_STRONG_MATCHES) tier = 'HIGH'
+  // A single candidate that just clears the floor is not a strong suggestion, and two candidates
+  // that score about the same mean the ranking itself is unsure. Both are the same fact to the
+  // dry run: this task's outcome should be read with care.
+  else if (runnerUp === undefined || best.score < runnerUp.score * 1.25) tier = 'NONE'
+  return { candidates, tokens, tier, reason: 'ok' }
+}
+
+/** Which of the four weighted fields each matched token landed in — for telemetry, not display. */
+function matchedFields(row, tokens) {
+  const fields = []
+  const nameText = String(row.name ?? '').toLowerCase()
+  const descText = String(row.description ?? '').toLowerCase()
+  const whenText = String(row.whenToUse ?? '').toLowerCase()
+  const pathText = (String(row.repo ?? '') + '/' + String(row.relpath ?? '')).toLowerCase()
+  if (tokens.some((t) => nameText.includes(t))) fields.push('name')
+  if (tokens.some((t) => whenText !== '' && whenText.includes(t))) fields.push('whenToUse')
+  if (tokens.some((t) => descText.includes(t))) fields.push('description')
+  if (tokens.some((t) => pathText.includes(t))) fields.push('path')
+  return fields
+}
 /**
  * Clamp a body to `max` characters and say whether anything was dropped.
  *
@@ -679,57 +856,17 @@ export function buildSkillRouterTools(ctx, register) {
       // the loose pass only rescues a query that would otherwise return nothing — the
       // common case for keyword-AND search. Loose hits are labelled with matchCount so the
       // model can tell a real hit from a near-miss instead of trusting them equally.
-      const scoreRow = (row, requireAll) => {
-        const nameText = row.name.toLowerCase()
-        const descText = row.description.toLowerCase()
-        const whenText = String(row.whenToUse ?? '').toLowerCase()
-        const pathText = (row.repo + '/' + row.relpath).toLowerCase()
-        let score = 0
-        let nameHits = 0
-        let matchCount = 0
-        const why = explaining ? [] : undefined
-        for (const token of tokens) {
-          let part = 0
-          const fields = []
-          if (nameText.includes(token)) {
-            part += 100
-            nameHits += 1
-            fields.push('name')
-          }
-          if (descText.includes(token)) {
-            part += 24
-            fields.push('description')
-          }
-          // A whenToUse value IS trigger phrasing, so a hit there says more about intent
-          // than a hit in prose does — scored above description, below the name.
-          if (whenText !== '' && whenText.includes(token)) {
-            part += 40
-            fields.push('whenToUse')
-          }
-          if (pathText.includes(token)) {
-            part += 6
-            fields.push('path')
-          }
-          if (part === 0) {
-            if (requireAll) return undefined
-            if (why !== undefined) why.push(token + ': -')
-            continue
-          }
-          matchCount += 1
-          score += part
-          if (why !== undefined) why.push(token + ': +' + String(part) + ' (' + fields.join('+') + ')')
-        }
-        const exact = nameText === query.trim().toLowerCase()
-        if (exact) score += 400
-        if (why !== undefined && exact) why.push('exact name: +400')
-        return { row, score, matchCount, nameHits, why, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
-      }
-
+      //
+      // The scorer itself is the module-level `scoreRow`, shared with the discovery layer: the
+      // weights are one set of numbers and must not be copied. What stays HERE is the query
+      // policy — strict AND, then the all-but-one rescue — because that policy is what makes
+      // `skill_search` behave predictably for a model-written query, and it is exactly what the
+      // discovery layer must not inherit (see `discoverRows`).
       const collect = (requireAll) => {
         const found = []
         for (const row of loaded.rows) {
           if (repoFilter !== '' && !row.repo.toLowerCase().includes(repoFilter)) continue
-          const scored = scoreRow(row, requireAll)
+          const scored = scoreRow(row, { tokens, requireAll, explaining, exactText: query })
           if (scored !== undefined) found.push(scored)
         }
         return found
@@ -1172,8 +1309,34 @@ export function buildSkillRouterTools(ctx, register) {
   register(searchTool.name, searchTool)
   register(loadTool.name, loadTool)
   register(refTool.name, refTool)
-  return { searchTool, loadTool, refTool }
+
+  /**
+   * Rank the library for a task sentence, reusing this builder's index cache.
+   *
+   * Read-only: it never loads a body, never writes, and never caches a decision. The agent still
+   * decides what to load — see the note on `discoverRows`.
+   *
+   * @param taskText - the raw user task.
+   * @param cwd - session workspace, used to locate the library exactly as the tools do.
+   * @param signal - abort signal.
+   */
+  async function discover(taskText, cwd, signal) {
+    const loaded = await loadIndex(cwd, signal)
+    // An unloaded index is not "nothing matched" — the dry run has to be able to tell those two
+    // apart, or a broken library would look like a well-behaved silent router.
+    if (loaded.root === '') return { candidates: [], tokens: [], tier: 'NONE', reason: 'no-library', indexRows: 0 }
+    const result = discoverRows(loaded.rows, taskText, DISCOVERY_LIMIT)
+    return { ...result, indexRows: loaded.rows.length }
+  }
+
+  return { searchTool, loadTool, refTool, discover }
 }
+
+// Zero dependencies, and that has to stay true of the discovery side as well: `discovery.js`
+// imports node:fs and node:path only, and this entry imports it relatively. Keeping the
+// integration column (reading a task, writing a line) in its own module is what lets the ranking
+// stay pure and testable without a host.
+import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder } from './discovery.js'
 
 /**
  * Durable DSH plugin entry: registers all three tools on the global tool registry.
@@ -1185,8 +1348,95 @@ export function buildSkillRouterTools(ctx, register) {
 export const name = 'dsh-skill-router'
 export const inject = ['fs', 'tools']
 
+/**
+ * Turn the user messages entering a step into the task text discovery reads.
+ *
+ * The content blocks are where the words are; anything that is not text (an image attachment, a
+ * file reference) is skipped rather than stringified, because discovery matches Latin-script
+ * keywords and a serialized block would only add noise.
+ */
+function taskTextOf(messages) {
+  const parts = []
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (message === null || typeof message !== 'object') continue
+    if (message.role !== 'user') continue
+    const content = message.content
+    if (typeof content === 'string') {
+      parts.push(content)
+      continue
+    }
+    if (Array.isArray(content) === false) continue
+    for (const block of content) {
+      if (block === null || typeof block !== 'object') continue
+      if (typeof block.text === 'string') parts.push(block.text)
+    }
+  }
+  return parts.join('\n')
+}
+
+/** The one-line hint. Names and matched fields only — the byte budget is the design. */
+function discoveryHint(result) {
+  const parts = result.candidates.map((c) => (c.fields.length === 0 ? c.name : c.name + ' (' + c.fields.join(', ') + ')'))
+  return (
+    'Maybe relevant skills for this task: ' + parts.join('; ') + '. ' +
+    'Load any that fit with skill_load, or ignore this and continue without one.'
+  )
+}
+
 export function apply(ctx) {
-  buildSkillRouterTools(ctx, (toolName, tool) => {
+  const router = buildSkillRouterTools(ctx, (toolName, tool) => {
     ctx.effect(() => ctx.tools.register(tool), 'skill-router: ' + toolName)
   })
+
+  // ── dry run: measure, do not act ────────────────────────────────────────────────────────
+  //
+  // At the first step of a turn the library is ranked for the incoming task, and ONLY the
+  // outcome is recorded. `agent/pre-step` is the right seam because it runs before the request
+  // is built — but it is also the seam where acting would change every turn's context, so the
+  // first version of this deliberately writes a JSONL line and returns the decision untouched.
+  //
+  // Two facts about the seam that the eventual injection must respect, both verified in the
+  // harness rather than assumed:
+  //   * `step` must be 1. The waterfall runs per step, and the messages it replaces are that
+  //     step's claimed batch, so hinting on every step would repeat the hint for one task.
+  //   * `agent.inject()` is NOT the way to make the hint visible to the current step:
+  //     `preStep` calls `inbox.claim()` before dispatching the waterfall, so an injected message
+  //     lands in `next-step` and is only claimed at the NEXT step. The current step sees exactly
+  //     `decision.messages` — so the hint belongs in that array, which is also what becomes the
+  //     session's `user/message` for the first attempt.
+  const discoveryLog = process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG
+  const recorder = makeDiscoveryRecorder(discoveryLog === undefined ? defaultDiscoveryLogPath() : discoveryLog, undefined)
+  if (recorder.path !== undefined) {
+    ctx.on('agent/pre-step', async ({ agent, messages, turn, step, signal }, next) => {
+      const decision = await next()
+      if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
+      if (step !== 1) return decision
+      const taskText = taskTextOf(messages).trim()
+      if (taskText === '') return decision
+      try {
+        const started = Date.now()
+        const cwd = agent === undefined || agent === null ? '' : String(agent.session.header.cwd ?? '')
+        const result = await router.discover(taskText, cwd, signal)
+        recorder.write(
+          discoveryRecord({
+            turn,
+            step,
+            result,
+            elapsedMs: Date.now() - started,
+            indexRows: result.indexRows,
+            // Not available yet, and recorded as false so a later reading of the log can tell
+            // the measured period from the injected one.
+            injected: false,
+          }),
+        )
+      } catch (error) {
+        // Telemetry is never worth a failed turn — but a silent catch is how a dry run produces
+        // "three days, no data" and nothing to look at. Keep the failure observable in-process
+        // (tests read this) without writing anything to the user's session.
+        const sink = globalThis.__dshSkillRouterDiscoveryErrors
+        if (Array.isArray(sink)) sink.push(String(error && error.message ? error.message : error))
+      }
+      return decision
+    })
+  }
 }

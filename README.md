@@ -349,7 +349,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.10.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -397,7 +397,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.10.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -408,6 +408,46 @@ inject: (sessionId, binding) => {
 翻译是**术语表 + 专名白名单**，不是 872 条整名对照表：短语优先（`best-practices` → 最佳实践），再退到单词（`troubleshooting` → 故障排查），虚词（`and`/`from`/`the`）直接丢弃。
 
 > **这一栏曾经是空的，原因值得留着。** 它先后读错过四次数据源：猜的节点形状、请求头里本轮的**工具声明**（把"给模型看过"当成"被加载过"）、`useChat().legacy.nodes`（实测同一时刻 210 个节点、**0 次工具调用**，而账本里有 2778+ 条事件），以及对着 `source.loadOlder` 写翻页（方法在 `session` 上，于是守卫每次都在第一行返回，**四次"修复"全都改在一条从未执行的代码路径上**）。四次都不崩溃、UI 都画得出来——所以数据契约必须实测，不能推断。复盘见 `docs/release-notes-v1.8.0.md`。
+
+## 任务感知的技能发现（**当前是干跑：只测量，不注入**）
+
+上面三个工具解决的是"技能很多，怎么让 Agent 找到"。但它们解决不了另一件事：
+
+> **Agent 会不会想到该去找？**
+
+库里的技能对模型不可见，所以用上一个的前提是**模型自己先想起要搜索**。用户说"帮我做一次 Semgrep 安全审计"，如果模型决定直接回答，那 `skill_search` 根本不会发生——这一层就是为这个缺口准备的。
+
+它挂在 `agent/pre-step` 上（DSH 的瀑布事件，在请求组装之前运行），在**回合第一步**用**本地、零模型调用**的方式给任务排个序：
+
+```
+用户任务（仅第一步）
+   ↓
+与 skill_search 同一个 tokenizer、同一个 scoreRow 打分函数（权重只写一份）
+   ↓
+但**不继承那个工具的查询策略**：不做严格 AND、不做 all-but-one 回落
+   ↓
+top 5，或明确"什么都没有"
+```
+
+**为什么必须共享 scorer、却不共享查询语义。** `skill_search` 的严格 AND 是为**模型写出来的短查询**设计的；任务句子是散文，"分析这个 React 项目的性能问题"在严格 AND 下没有任何解释——那会让这一层静默失效。所以差异留在调用方，权重留在函数里。
+
+**当前版本不注入任何东西。** 它只往 `~/.dsh/skill-router/discovery.jsonl` 追加一行遥测，然后原样返回决策。测的是你真正需要数据才能回答的三个问题：候选经常有意义吗、误报多不多、多少任务什么都找不到。
+
+```json
+{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":2,"elapsedMs":11,
+ "candidateCount":1,"candidates":[{"name":"semgrep","score":210,"matched":3,"nameHits":1,"fields":["name","whenToUse"]}],"injected":false}
+```
+
+记录里**没有用户原文**——只有命中的 token 数量、候选名与分数。一个观察功能不该顺手制造新的会话内容存储。日志有字节上限并轮转，所以放着跑几周也不会无限增长。
+
+`tier` 是这个阶段的核心读数：**HIGH**（命中 name 且 ≥2 个不同 token 落地）、**MEDIUM**（只有 description 命中、或单个弱关键词）、**NONE**（没有足够区分度，或与第二名咬得太近）。几天数据之后才谈"阈值该定在哪"，而不是凭感觉定。
+
+**两个已知边界，现在不修，因为干跑的意义就是先量它们：**
+
+- **索引只认 Latin script。** tokenizer 是 `[^a-z0-9+#._-]`，所以中文任务（"帮我做一次安全审计"）产出 0 个关键词。这不是缺陷需要掩盖，而是索引的性质：这类任务记为 `reason: "no-searchable-token"`，干跑会告诉你它占多少比例。如果比例很高，下一步再考虑 aliases 或双语的 `whenToUse`——**不是现在上 embedding**。
+- **`reason` 区分"没有匹配"和"没有库"**（`no-library`）。否则一个坏掉的索引会看起来像一个安静的、表现良好的路由器。
+
+正式启用时（注入）会改一处，而且这一处已经取证过：hint 要放进 `decision.messages`，**不是** `agent.inject()`。因为 `preStep` 在派发瀑布**之前**就调用了 `inbox.claim()`，`inject()` 的东西要等到**下一步**才被取走——而这一层要在第一步就起作用；`decision.messages` 才是当前这一步真正进入请求的权威批次（并且会落成会话里的 `user/message`）。
 
 
 ## 工程约束
@@ -428,7 +468,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-二十一个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+二十二个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -445,6 +485,7 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
+| `discovery-dry-run.mjs` | 发现层的干跑，**真的调用 `apply(ctx)` 并像 agent-loop 一样触发 `agent/pre-step`**：注册三个工具与监听、**不改变决策**、写出遥测、只在第一步记录、中文任务记 `no-searchable-token`、`reject` 原样返回，以及**遥测里没有用户原文** |
 | `usage-ledger.mjs` | 技能账本的纯逻辑（59 条断言），夹具照抄实测事件形状：三种加载工具都算、`skill_search` 不算、同一条事件跨页只计一次、**不同事件共用同一 `callId` 仍计两次**、一次调用带 `A+B` 两个名字都保留、路径与裸名归并为同一技能、`hasMore` 三态、**窗口挤出后已读到的记录不丢**、**按 `seq` 排成会话顺序**、**行数与调用数的关系在结构上成立**（`calls ≤ rows`，取等当且仅当没有多名调用）、坏输入返回空账本而不抛 |
 | `usage-tab.mjs` | 标签页接线（87 条断言），通过**浏览器装载它的同一条路径**取组件再渲染：注册契约、`inject` 两个参数、三种"读不到账本"的说明、首屏即读且每页只拉一次、`hasMore` 永为真时在上限内停住、第 5 页深埋的调用被找到、200 片流式碎片只排一次渲染、**窗口挤掉最老一条后它仍在清单里**、**父组件重渲染不得让翻页卡死**、**「读取中」必须有截止时间**、**「行数 ≠ 调用数」必须自我解释**、界面只留结论不留开发用诊断 |
 | `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**扫描并拒绝**已证伪的数据契约回来（`legacy.nodes`、`useChat`、把工具声明当用量、**对着 `source.loadOlder` 而不是 `session.loadOlder` 写翻页**） |
@@ -467,7 +508,7 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         二十一个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         二十二个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
