@@ -49,7 +49,11 @@ check('does not collect per-turn tool declarations as usage', /toolDecl|declarat
 check('reads the session ledger via sessions.binding', code.includes('sessions') && code.includes('binding('))
 check('reads snapshot entries from eventSource', code.includes('eventSource') && code.includes('getSnapshot'))
 check('keys records on callId', code.includes('callId'))
-check('pages with loadOlder', code.includes('loadOlder'))
+// Paging goes through the SESSION, never the source. `SessionEventSource` is
+// `ObservableSnapshot<SessionEventWindow>` — declared surface: `getSnapshot()` and `subscribe()` —
+// while `loadOlder(): Promise<void>` is on the session face. Calling it on the source made the
+// paging effect exit at its guard on every render, and four "fixes" changed code that never ran.
+check('pages through the session, not the source', /session\.loadOlder\(\)/.test(code) && /source\.loadOlder/.test(code) === false)
 check('subscribes to the ledger', code.includes('subscribe'))
 
 // --- 2. compile as a classic script, then materialize the registration ---------------

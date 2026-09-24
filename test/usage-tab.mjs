@@ -266,8 +266,16 @@ const mount = (options) => {
       bindingCalls.push(sessionId)
       if (seats === 'throws') throw new Error('ui-sessions: unknown session "' + String(sessionId) + '"')
       if (seats === 'no-binding') return undefined
-      if (seats === 'no-source') return { sessionId, session: {}, ctx: {} }
-      return { sessionId, session: {}, eventSource: opts.source, ctx: {} }
+      // `eventSource` deliberately has NO `loadOlder`. The framework's own declaration is
+      // `SessionEventSource = ObservableSnapshot<SessionEventWindow>`, whose entire surface is
+      // `getSnapshot()` and `subscribe()`; `loadOlder(): Promise<void>` is on the session face.
+      //
+      // This fixture used to put `loadOlder` on the SOURCE — the same wrong object the product
+      // called it on. That is why the suite could be green while the tab never paged: the fixture
+      // agreed with the bug instead of exposing it.
+      const session = opts.session === undefined ? { loadOlder: opts.loadOlder } : opts.session
+      if (seats === 'no-source') return { sessionId, session, ctx: {} }
+      return { sessionId, session, eventSource: opts.source, ctx: {} }
     },
   }
   const effects = []
@@ -333,6 +341,18 @@ const makeSource = (options) => {
   let hasMore = opts.hasMore === true
   let listeners = []
   let loadOlderCalls = 0
+  /** The session's paging method — NOT the source's. `makeSource` returns the window only. */
+  const loadOlder = () => {
+    loadOlderCalls += 1
+    if (typeof opts.onLoadOlder === 'function') {
+      const next = opts.onLoadOlder(loadOlderCalls)
+      if (next !== undefined) {
+        entries = next.entries === undefined ? entries : next.entries
+        hasMore = next.hasMore === undefined ? hasMore : next.hasMore
+      }
+    }
+    return Promise.resolve()
+  }
   return {
     get loadOlderCalls() {
       return loadOlderCalls
@@ -340,28 +360,16 @@ const makeSource = (options) => {
     get listenerCount() {
       return listeners.length
     },
+    /** The window, as the framework declares it: `getSnapshot` + `subscribe`, nothing else. */
     getSnapshot: () => ({ entries: entries.slice(), hasMore, revision: loadOlderCalls + entries.length }),
-    window: () => ({ entries: entries.slice(), hasMore }),
     subscribe: (fn) => {
       listeners.push(fn)
       return () => {
         listeners = listeners.filter((l) => l !== fn)
       }
     },
-    unsubscribe: (fn) => {
-      listeners = listeners.filter((l) => l !== fn)
-    },
-    loadOlder: () => {
-      loadOlderCalls += 1
-      if (typeof opts.onLoadOlder === 'function') {
-        const next = opts.onLoadOlder(loadOlderCalls)
-        if (next !== undefined) {
-          entries = next.entries === undefined ? entries : next.entries
-          hasMore = next.hasMore === undefined ? hasMore : next.hasMore
-        }
-      }
-      return Promise.resolve()
-    },
+    /** Mount with this: the session face carries the paging method. */
+    session: { loadOlder },
     /** 账本自己 append 了一条新事件并通知订阅者。 */
     append: (event) => {
       entries = entries.concat([{ type: 'event', event }])
@@ -380,7 +388,8 @@ const entry = (event) => ({ type: 'event', event })
 console.log('标签页接线:')
 
 // --- 1. 注册契约：标签页必须真的出现在 conversation.view 上 ----------------------
-const loaded = mount({ source: makeSource({ entries: [] }) })
+const emptySource = makeSource({ entries: [] })
+const loaded = mount({ source: emptySource, session: emptySource.session })
 check('client.js 注册到 conversation.view', loaded.Component !== undefined, 'registrations=' + loaded.registrations.length)
 if (loaded.Component === undefined) {
   console.log('\n标签页接线 FAILED: 组件没有注册，后面的测试无从谈起')
@@ -437,13 +446,18 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
         return { entries: all.slice(), hasMore: hasMoreAt === undefined ? true : n < hasMoreAt }
       },
     })
-    const mounted = mount({ source })
+    const mounted = mount({ source, session: source.session })
     return { source, props: mounted.propsFor('s1'), ...mounted }
   }
 
   const bounded = build(3)
   const firstTree = bounded.fake.render(bounded.Component, bounded.props)
   check('首屏就发出第一页请求', bounded.source.loadOlderCalls === 1, 'loadOlder=' + bounded.source.loadOlderCalls)
+  // 这一条是这一整轮的核心：翻页方法在**会话**上，不在账本上。账本
+  // （`SessionEventSource = ObservableSnapshot<SessionEventWindow>`）只声明了 `getSnapshot` 与
+  // `subscribe`。历史版本对着 `source.loadOlder` 写代码，于是 effect 每次都在守卫处早退，
+  // 四次"修复"全都改在一条从未执行的代码路径上。这个断言的作用就是让它无法再发生。
+  check('翻页调用的是会话上的 loadOlder，而不是账本上的', typeof bounded.source.loadOlder === 'undefined' && bounded.source.loadOlderCalls === 1)
   check('首屏就能看到页 0 的技能', textOf(firstTree).indexOf('page-zero') >= 0, textOf(firstTree).slice(0, 160))
   const rounds = await settle(bounded.fake, bounded.Component, bounded.props)
   check('翻页收敛：hasMore 变 false 后不再请求', bounded.source.loadOlderCalls === 3, 'loadOlder=' + bounded.source.loadOlderCalls)
@@ -478,7 +492,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
       return { entries: all.slice(), hasMore: n < 5 }
     },
   })
-  const { fake, Component, propsFor } = mount({ source })
+  const { fake, Component, propsFor } = mount({ source, session: source.session })
   const props = propsFor('s1')
   fake.render(Component, props)
   await settle(fake, Component, props)
@@ -491,7 +505,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 // --- 5. 订阅：流式碎片不逐片重渲染，最后一片仍要落地 ----------------------------
 {
   const source = makeSource({ entries: [], hasMore: false })
-  const { fake, clock, Component, propsFor } = mount({ source })
+  const { fake, clock, Component, propsFor } = mount({ source, session: source.session })
   const props = propsFor('s1')
   fake.render(Component, props)
   check('订阅已挂上', source.listenerCount === 1, 'listeners=' + source.listenerCount)
@@ -517,7 +531,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
     entries: [entry(call('old', 'skill_load', { name: 'evicted-skill' }, 1)), entry(call('keep', 'skill_load', { name: 'kept-skill' }, 2))],
     hasMore: false,
   })
-  const { fake, clock, Component, propsFor } = mount({ source })
+  const { fake, clock, Component, propsFor } = mount({ source, session: source.session })
   const props = propsFor('s1')
   const before = textOf(fake.render(Component, props))
   check('挤出前两条都在', before.indexOf('evicted-skill') >= 0 && before.indexOf('kept-skill') >= 0, before.slice(0, 200))
@@ -542,7 +556,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 {
   const sourceA = makeSource({ entries: [entry(call('a1', 'skill_load', { name: 'skill-in-a' }))], hasMore: false })
   const sourceB = makeSource({ entries: [entry(call('b1', 'skill_load', { name: 'skill-in-b' }))], hasMore: false })
-  const { fake, Component, propsFor } = mount({ source: sourceA })
+  const { fake, Component, propsFor } = mount({ source: sourceA, session: sourceA.session })
   const a = textOf(fake.renderSession(Component, propsFor('session-a')))
   check('会话 A 显示 A 的技能', a.indexOf('skill-in-a') >= 0, a.slice(0, 160))
   // 同一作用域的注入结果被缓存：重复取 props 不应该再问一次 sessions。
@@ -564,9 +578,9 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 {
   // (a) loadOlder 返回非 promise（宿主侧接口不保证返回 promise，`.then` 会当场抛）
   const nonPromise = makeSource({ entries: [entry(call('n1', 'skill_load', { name: 'kept-while-paging' }))], hasMore: true })
-  nonPromise.loadOlder = () => undefined
+  nonPromise.session.loadOlder = () => undefined
   {
-    const { fake, clock, Component, propsFor } = mount({ source: nonPromise })
+    const { fake, clock, Component, propsFor } = mount({ source: nonPromise, session: nonPromise.session })
     const props = propsFor('s1')
     const first = textOf(fake.render(Component, props))
     check('非 promise 的 loadOlder 不使标签页崩溃', first.indexOf('技能调用清单') >= 0, first.slice(0, 160))
@@ -581,9 +595,9 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 
   // (b) loadOlder 永远不 settle：看门狗必须兜住
   const never = makeSource({ entries: [entry(call('w1', 'skill_load', { name: 'stuck-then-ok' }))], hasMore: true })
-  never.loadOlder = () => new Promise(() => {})
+  never.session.loadOlder = () => new Promise(() => {})
   {
-    const { fake, clock, Component, propsFor } = mount({ source: never })
+    const { fake, clock, Component, propsFor } = mount({ source: never, session: never.session })
     const props = propsFor('s1')
     const first = textOf(fake.render(Component, props))
     check('未 settle 时先如实显示「仍在继续」', first.indexOf('仍在继续') >= 0, first.slice(0, 200))
@@ -613,11 +627,11 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 // 能拿到账本——只赌其中一个，就是在赌渲染器走哪条路。
 {
   const source = makeSource({ entries: [entry(call('k1', 'skill_load', { name: 'via-key' }))], hasMore: false })
-  const first = mount({ source })
+  const first = mount({ source, session: source.session })
   const viaFirst = textOf(first.fake.render(first.Component, first.propsFor('session-key')))
   check('inject 第一个参数（binding.key）能取到账本', viaFirst.indexOf('via-key') >= 0, viaFirst.slice(0, 160))
 
-  const second = mount({ source })
+  const second = mount({ source, session: source.session })
   const viaBinding = textOf(second.fake.render(second.Component, second.propsFor('session-key', { callInjectWith: 'binding-only' })))
   check('inject 第二个参数（作用域绑定）也能取到账本', viaBinding.indexOf('via-key') >= 0, viaBinding.slice(0, 160))
   check('第二个参数回退时确实用了 binding.key', second.bindingCalls.includes('session-key'), 'binding(' + JSON.stringify(second.bindingCalls) + ')')
@@ -644,7 +658,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
         return { entries: all.slice(), hasMore: n < 2 }
       },
     })
-    const mounted = mount({ source })
+    const mounted = mount({ source, session: source.session })
     return { source, ...mounted }
   }
 
@@ -661,8 +675,8 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 
   // 最坏情况：请求永不 settle，且父组件一直重渲染——看门狗必须仍然到期。
   const never = makeSource({ entries: [entry(call('n0', 'skill_load', { name: 'churn-b' }))], hasMore: true })
-  never.loadOlder = () => new Promise(() => {})
-  const second = mount({ source: never })
+  never.session.loadOlder = () => new Promise(() => {})
+  const second = mount({ source: never, session: never.session })
   const fresh2 = () => Object.assign({ sessionId: 's1', key: 's1' }, second.propsFor('s1', { freshInject: true }))
   second.fake.render(second.Component, fresh2())
   second.fake.render(second.Component, fresh2())
@@ -682,7 +696,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   // (a) 请求永不 settle、且看门狗被外力清掉（模拟"回调链断掉"）：心跳必须兜住。
   const source = makeSource({ entries: [entry(call('d1', 'skill_load', { name: 'deadline-a' }))], hasMore: true })
   source.loadOlder = () => new Promise(() => {})
-  const { fake, clock, Component, propsFor } = mount({ source })
+  const { fake, clock, Component, propsFor } = mount({ source, session: source.session })
   const props = propsFor('s1')
   const first = textOf(fake.render(Component, props))
   check('首屏如实显示「读取中」', first.indexOf('读取中') >= 0, first.slice(-140))
@@ -698,7 +712,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
     hasMore: true,
     onLoadOlder: () => ({ entries: [entry(call('f1', 'pwsh', { command: 'ls' })), entry(call('f0', 'skill_load', { name: 'deadline-b' }))], hasMore: false }),
   })
-  const second = mount({ source: fine })
+  const second = mount({ source: fine, session: fine.session })
   const p2 = second.propsFor('s1')
   second.fake.render(second.Component, p2)
   await settle(second.fake, second.Component, p2)
@@ -707,15 +721,29 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   check('正常完成后心跳不误报超时', ok.indexOf('已读完') >= 0, ok.slice(-140))
 }
 
-// --- 11. 卸载时不留悬挂订阅 -----------------------------------------------------
+// --- 11. 订阅与取消：契约是 subscribe() 返回取消函数，没有 unsubscribe() ----------
 {
   const source = makeSource({ entries: [], hasMore: false })
-  const { fake, Component, propsFor } = mount({ source })
+  const { fake, Component, propsFor } = mount({ source, session: source.session })
   fake.render(Component, propsFor('s1'))
   check('装载后订阅数为 1', source.listenerCount === 1, 'listeners=' + source.listenerCount)
+  // `ObservableSnapshot` declares only `getSnapshot()` and `subscribe(fn): () => void` — the
+  // canceller is the RETURN VALUE, there is no `unsubscribe` method. The product used to call
+  // `source.unsubscribe` behind a `typeof` guard, which silently did nothing and left one listener
+  // attached per mount; asserting the real shape is what keeps that from coming back.
+  check('账本上没有 unsubscribe 方法（取消靠 subscribe 的返回值）', typeof source.unsubscribe === 'undefined')
+  let disposed = 0
+  const disposer = source.subscribe(() => {
+    disposed += 1
+  })
+  check('subscribe 返回取消函数', typeof disposer === 'function')
+  disposer()
+  check('调用返回值即取消该订阅，且不影响其他订阅者', source.listenerCount === 1 && disposed === 0, 'listeners=' + source.listenerCount)
+  // 卸载路径必须用返回值取消：否则每次装载都会多留一个监听者。
   const before = source.listenerCount
-  source.unsubscribe(() => {})
-  check('unsubscribe 不会误删其他订阅者', source.listenerCount === before, 'listeners=' + source.listenerCount)
+  const second = mount({ source, session: source.session })
+  second.fake.render(second.Component, second.propsFor('s1'))
+  check('第二次装载会新增订阅，且取消靠返回值而非不存在的方法', source.listenerCount === before + 1, 'listeners=' + source.listenerCount)
 }
 
 console.log(problems.length === 0 ? '\n标签页接线: OK' : '\n标签页接线 FAILED:\n  ' + problems.join('\n  '))

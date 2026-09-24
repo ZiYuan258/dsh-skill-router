@@ -463,7 +463,7 @@ window.__ModuleLoader__.load({
       let completeness = 'complete'
       if (opts.error !== undefined && opts.error !== null) completeness = 'error'
       else if (opts.loading === true) completeness = 'loading'
-      else if (opts.hasMore === true || opts.stalled === true) completeness = 'partial'
+      else if (opts.hasMore === true || opts.stalled === true || opts.capped === true) completeness = 'partial'
 
       // Distinct NORMALIZED names, which is the question "涉及多少个技能" asks. It dedupes
       // separately from `calls` on purpose: one call naming A and B is 1 call and 2 skills,
@@ -483,6 +483,7 @@ window.__ModuleLoader__.load({
         uniqueSkills,
         completeness,
         hasMore: opts.hasMore === true,
+        capped: opts.capped === true,
         page: typeof opts.page === 'number' ? opts.page : 0,
         error: opts.error === undefined ? null : opts.error,
       }
@@ -550,17 +551,23 @@ window.__ModuleLoader__.load({
      *
      * `base` is the seed — the page-0 read captured when the hook first ran — and the window is
      * merged on top of it, so entries that fell out of the window stay in the ledger.
+     *
+     * `canPage` decides whether `hasMore` is even actionable. Without a session face to page with,
+     * the window's `hasMore: true` means "the session has more history", not "I can reach it", and
+     * the two must not be reported the same way: the tab would either promise a completion it can
+     * never reach or print a total as if the history ended here.
      */
     function ledgerFrom(base, source, state) {
       const now = windowOf(source)
       return buildLedger(now.entries, {
         previous: base,
-        hasMore: now.hasMore,
+        hasMore: state.canPage === true && now.hasMore,
         // Passed through, NOT merged into `hasMore`: `buildLedger` must still be able to tell
         // "paging gave up here" from "the history ended here". Merging them once made a stalled
         // session print a complete-looking total.
         stalled: state.stalled === true,
         loading: state.loading === true,
+        capped: state.canPage !== true && now.hasMore === true,
         error: state.error,
         page: state.page,
       })
@@ -584,6 +591,12 @@ window.__ModuleLoader__.load({
       // pass it down.
       const source = input.source
       const usable = source !== null && source !== undefined && typeof source.getSnapshot === 'function'
+      // Paging needs the SESSION, not the source: `loadOlder()` is declared on `SessionFace`, and
+      // `SessionEventSource` (`ObservableSnapshot<SessionEventWindow>`) does not have it. Absent a
+      // session the tab still lists what the window holds — it just cannot read further back, and
+      // says so instead of promising a total it cannot reach.
+      const session = input.session
+      const canPage = session !== null && session !== undefined && typeof session.loadOlder === 'function'
       const absent = typeof input.sourceError === 'string' && input.sourceError !== '' ? input.sourceError : '这个会话没有可用的 eventSource。'
 
       const seedRef = React.useRef(null)
@@ -701,12 +714,17 @@ window.__ModuleLoader__.load({
             if (live) push()
           }, LIVE_THROTTLE_MS)
         }
-        if (typeof source.subscribe === 'function') source.subscribe(onChange)
+        // `ObservableSnapshot.subscribe(fn)` returns the canceller — there is no `unsubscribe`
+        // method. Calling one that does not exist behind a `typeof` guard looks harmless and is
+        // not: the guard silently skips, the listener stays attached for the life of the page, and
+        // every later remount adds another one. Same wrong-object mistake as `loadOlder`, one line
+        // away from it.
+        const dispose = typeof source.subscribe === 'function' ? source.subscribe(onChange) : undefined
         push()
         return () => {
           live = false
           if (timer !== undefined) clearTimeout(timer)
-          if (typeof source.unsubscribe === 'function') source.unsubscribe(onChange)
+          if (typeof dispose === 'function') dispose()
         }
       }, [usable, source, push])
 
@@ -720,7 +738,7 @@ window.__ModuleLoader__.load({
       // calls against a cap of 200 — and it is invisible on a short history, which finishes
       // long before the doubling can show.
       React.useEffect(() => {
-        if (usable === false || typeof source.loadOlder !== 'function') return undefined
+        if (usable === false || canPage === false) return undefined
         DIAG.effectRuns += 1
         if (gaveUpRef.current === true) return undefined
         const before = windowOf(source.getSnapshot())
@@ -807,7 +825,10 @@ window.__ModuleLoader__.load({
           }
           let request
           try {
-            request = source.loadOlder()
+            // `session.loadOlder()`, NOT `source.loadOlder()`. See `bindUsageSource`: the source is
+            // an `ObservableSnapshot` with no paging method at all, which is why this effect used to
+            // exit at its guard before reaching any of the code below.
+            request = session.loadOlder()
           } catch (error) {
             if (watchdogRef.current !== undefined) {
               clearTimeout(watchdogRef.current)
@@ -827,13 +848,13 @@ window.__ModuleLoader__.load({
 
         // NOTE: no cleanup here, deliberately — see `watchdogRef`. This effect's job is to START a
         // paging attempt when none is running; ending one belongs to the attempt itself.
-      }, [state.tick, usable, source])
+      }, [state.tick, usable, source, session, canPage])
 
       const ledger = React.useMemo(
-        () => (usable ? ledgerFrom(seedRef.current, source.getSnapshot(), { page: state.page, loading: reading, stalled: state.stalled, error: state.error }) : buildLedger([], { hasMore: false, loading: false, error: absent })),
+        () => (usable ? ledgerFrom(seedRef.current, source.getSnapshot(), { page: state.page, loading: reading, stalled: state.stalled, canPage, error: state.error }) : buildLedger([], { hasMore: false, loading: false, error: absent })),
         // `reading` is derived from the clock, so it is listed by name: when the heartbeat re-renders
         // past the deadline this memo has to recompute, or the tab keeps rendering the old verdict.
-        [usable, source, state.tick, reading, state.page, state.error, state.stalled],
+        [usable, source, state.tick, reading, state.page, state.error, state.stalled, canPage],
       )
       // A page that is merely `partial` is a real answer; one with no ledger at all is not, and
       // the difference is carried out to the view rather than inferred there. The two absent
@@ -859,6 +880,7 @@ window.__ModuleLoader__.load({
         mountId: mountIdRef.current,
         effectRuns: DIAG.effectRuns,
         heartbeats: DIAG.heartbeats,
+        canPage,
       }
     }
 
@@ -955,11 +977,14 @@ window.__ModuleLoader__.load({
       // "there is more and I am fetching it" and "there is more and I have stopped trying" is the
       // whole reason this line exists.
       if (ledger.completeness === 'loading') return '已读到第 ' + ledger.page + ' 页更早的记录，仍在继续。'
+      // The session has more history than this window holds and this tab has no way to reach it —
+      // stated as the limitation it is, rather than as a completion or as an endless read.
+      if (ledger.capped === true) return '这个会话还有更早的记录，但当前窗口没有给出向后读取的入口——上面的数字只是窗口里那部分的。'
       // Three ways to stop, and they mean different things to whoever is debugging: the request
       // answered but moved nothing (the ledger's own read is a no-op right now), the request
       // never answered, or the paging cap was reached.
       if (timedOut === true) return '读取更早记录没有回应，已停止——上面的数字只是这部分的。'
-      if (ledger.page === 0) return '账本暂时没有交出更早的记录（sessions.loadOlder 无进展），已停止——上面的数字只是这部分的。'
+      if (ledger.page === 0) return '账本暂时没有交出更早的记录（session.loadOlder 无进展），已停止——上面的数字只是这部分的。'
       return '已读到第 ' + ledger.page + ' 页更早的记录，之后不再继续读取——上面的数字只是这部分的。'
     }
 
@@ -970,6 +995,7 @@ window.__ModuleLoader__.load({
       if (ledger.completeness === 'complete') return '已读完'
       if (ledger.completeness === 'error') return '出错'
       if (ledger.completeness === 'loading') return '读取中'
+      if (ledger.capped === true) return '无读取入口'
       if (timedOut === true) return '超时停止'
       return ledger.page === 0 ? '无进展停止' : '到上限停止'
     }
@@ -987,7 +1013,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.7.2'
+    const VERSION = '1.8.0'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
@@ -1032,7 +1058,8 @@ window.__ModuleLoader__.load({
             + ' · 尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
             + ' · 挂载 ' + String(diag.mounts) + '(#' + String(diag.mountId) + ')'
             + ' · effect ' + String(diag.effectRuns)
-            + ' · 心跳 ' + String(diag.heartbeats),
+            + ' · 心跳 ' + String(diag.heartbeats)
+            + ' · 可翻页 ' + (diag.canPage === true ? '是' : '否'),
         ),
       )
     }
@@ -1046,6 +1073,7 @@ window.__ModuleLoader__.load({
       return React.createElement(UsageView, {
         key: sessionId,
         source: input.source,
+        session: input.session,
         sourceError: input.sourceError,
         sessionId: input.sessionId,
       })
@@ -1076,9 +1104,21 @@ window.__ModuleLoader__.load({
       if (sessions === undefined) return { sourceError: '会话服务缺席（ctx.get("sessions") 为空）。' }
       const key = sessionId !== undefined && sessionId !== null ? sessionId : binding === null || binding === undefined ? undefined : binding.key
       const resolved = typeof sessions.binding === 'function' ? sessions.binding(key) : undefined
-      const source = resolved === null || resolved === undefined ? undefined : resolved.eventSource
-      if (source === null || source === undefined) return { sourceError: '这个会话的账本还不可用（sessions.binding 没有返回 eventSource）。' }
-      return { source }
+      if (resolved === null || resolved === undefined) return { sourceError: '这个会话的账本还不可用（sessions.binding 没有返回绑定）。' }
+      const source = resolved.eventSource
+      // The paging method is NOT on the source, and this was the bug that survived four fixes.
+      //
+      // `SessionEventSource` is `ObservableSnapshot<SessionEventWindow>` — its entire declared
+      // surface is `getSnapshot(): T` and `subscribe(fn): () => void`. `loadOlder(): Promise<void>`
+      // lives on the SESSION face (`SessionFace` extends `ISession`), which is why the shipped
+      // trajectory tab calls `session.loadOlder()` and compares the window before and after.
+      //
+      // Reading `source.loadOlder` therefore made the tab's paging effect exit at its first guard
+      // on every single render, which is exactly what the instrumentation reported: `effect 0`
+      // beside `尝试 0`. Four fixes were applied to a code path that never executed.
+      return source === null || source === undefined
+        ? { sourceError: '这个会话没有可用的 eventSource。' }
+        : { source, session: resolved.session }
     }
 
     ctx.effect(
