@@ -97,7 +97,9 @@ DSH 把会话技能目录注入到**每一次**模型请求里（`dsh-tool-skill
 
 排序键依次是：是否全词命中 → 命中词数 → 总分 → 名字命中数 → 名字长度 → 字典序（确定性，同样输入永远同样顺序）。
 
-默认是**严格 AND**（每个关键词都要命中）。当 AND 结果为空且关键词多于一个时，自动重试**部分匹配**并置 `fallback: "or"`，每条带上 `matchCount`——**近似命中永远不会被伪装成真命中**；单个关键词不降级（没有可降级的余地）。
+默认是**严格 AND**（每个关键词都要命中）。当 AND 结果为空且关键词多于一个时，才尝试**部分匹配**：候选必须命中"除一个以外的全部"关键词，否则宁可回答"没找到"，并置 `fallback: "weak"`。命中的部分匹配带 `matchCount`、结果里 `strict: 0`，模型看到的头部也写成"0 exact match(es); N partial match(es)"——**近似命中永远不会被伪装成真命中**；单个关键词不降级（没有可降级的余地）。
+
+> 这条阈值是实测逼出来的：在 1026 行的参考库上，`test setup config helper` 原本返回 **1026 条**，绝大多数只共享一个常见词；收紧后是 **7 条**。同一实验里 `make a movie` 会因 `make`/`a` 命中全库，所以 `a`、`the`、`make`、`use` 这类无区分度的词在分词阶段就被丢弃（`tokenize` 里的 `STOP_WORDS`）。
 
 `explain: true` 时可看到分数构成，诊断"为什么搜不到"：
 
@@ -299,7 +301,9 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 | `names_only` | boolean | 只返回名字与仓库，不带描述（体积约降 60%） |
 | `explain` | boolean | 额外返回每条命中的分数构成，用于诊断 |
 
-返回 `total`、`shown`、`more`、`fallback`，以及每条命中的 `name`、`repo`、`description`、`copies`、`matchCount`、`whenToUse`、`files`、`path`、`libraryRelative`；开了 `explain` 时另有 `score` 与 `why`。
+返回 `total`、`strict`、`shown`、`more`、`fallback`，以及每条命中的 `name`、`repo`、`description`、`copies`、`matchCount`、`stale`、`whenToUse`、`files`、`path`、`libraryRelative`；开了 `explain` 时另有 `score` 与 `why`。
+
+`stale: true` 表示索引里有这一条但磁盘上已没有 `SKILL.md`——库改过而索引没重跑。这种条目**不会**让搜索失败（早期版本会直接抛 `ENOENT`，一条过期记录拖垮整个检索），而是被标出来，模型也能看到。
 
 ### `skill_load`
 
@@ -346,7 +350,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十四个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十五个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -361,6 +365,7 @@ npm test
 | `index-format.mjs` | 索引格式契约：6 列与 7 列都可解析、表头按形状识别、真库仍可用 |
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
+| `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
 | `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
@@ -373,7 +378,7 @@ npm test
 host.js                       插件本体：apply()、buildSkillRouterTools()、definePortableTool()
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十四个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         十五个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）
 .github/workflows/            CI：Linux 与 Windows 上、Node 20 / 22 / 24 各跑一遍 npm test

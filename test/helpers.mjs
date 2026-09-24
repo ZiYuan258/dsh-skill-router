@@ -98,6 +98,11 @@ export function makeFixture() {
     // Carries the optional whenToUse frontmatter field and the optional 7th index column,
     // so tests can prove trigger phrasing is parsed, scored and surfaced.
     { repo: 'gamma-skills', relpath: 'skills/gamma-triggers', name: 'gamma-triggers', description: 'Prose that never names the task.', whenToUse: 'ship the frobnicator' },
+    // A copy of an existing name that lives in a THIRD repo. Depth 2, so it does not
+    // displace the shallowest-copy winner; its purpose is the cross-repo case, where the
+    // search note has to list the repos to choose between. Copies within one repo are
+    // interchangeable, copies across repos change which skill you get.
+    { repo: 'zeta-skills', relpath: 'skills/alpha-widgets', name: 'alpha-widgets', description: 'Builds alpha widgets, from a different upstream entirely.' },
   ]
   const indexDir = join(root, '.skill-src')
   mkdirSync(indexDir, { recursive: true })

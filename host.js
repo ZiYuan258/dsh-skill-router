@@ -24,6 +24,22 @@ const DEFAULT_DESC = 220
 const LOAD_CAP = 120000
 
 /**
+ * Words that carry no signal in a keyword search, dropped before scoring.
+ *
+ * Deliberately short: it holds English function words and the most generic verbs, not
+ * domain vocabulary. A word like `test` or `config` is common but meaningful — filtering
+ * by "appears everywhere" instead of by "means nothing" would break the queries that
+ * work. Single characters are dropped separately in `tokenize`.
+ */
+const STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'can', 'do', 'does', 'for',
+  'from', 'get', 'has', 'have', 'how', 'i', 'in', 'into', 'is', 'it', 'its', 'make',
+  'me', 'my', 'of', 'on', 'or', 'our', 'should', 'so', 'that', 'the', 'their', 'them',
+  'then', 'there', 'these', 'they', 'this', 'to', 'use', 'using', 'want', 'was', 'we',
+  'what', 'when', 'which', 'will', 'with', 'you', 'your',
+])
+
+/**
  * Build a registry-ready tool definition without relying on the runtime's defineTool.
  *
  * `parameters` is accepted in either shape and normalized to standard JSON Schema, so
@@ -280,7 +296,15 @@ function tokenize(query) {
     if (tokens.length >= 12) break
     tokens.push(token)
   }
-  return tokens
+  // Drop articles and other filler, but never to the point of having no keyword at all: a
+  // query of "the" alone must still say something useful rather than "no keywords".
+  //
+  // Measured: searching "make a movie" against a 1026-row library returned the whole
+  // library, top-ranked on rows containing "make" and "a" — "a" alone scored +130 because
+  // the weights reward any name/path hit equally. Words with no discriminative power do
+  // not belong in a ranking.
+  const meaningful = tokens.filter((token) => token.length > 1 && STOP_WORDS.has(token) === false)
+  return meaningful.length > 0 ? meaningful : tokens
 }
 
 /** Shorten one display line (search hit descriptions). Silent by design: this is presentation. */
@@ -332,12 +356,34 @@ export function buildSkillRouterTools(ctx, register) {
     return nameCounts.get(String(name).toLowerCase()) ?? 1
   }
 
+  /**
+   * Turn one index row into a path on disk. Never throws.
+   *
+   * `ctx.fs.resolve` is only called on a path that exists (it throws otherwise), so a row
+   * whose directory has been deleted used to take down the whole tool call: a single stale
+   * entry — the expected result of deleting a skill directory and not regenerating the
+   * index — made `skill_search` throw ENOENT instead of answering. Search is a read-only
+   * lookup; it must not fail because one row in the index is out of date.
+   *
+   * `missing` is what lets a caller distinguish "this row is stale" from "this row is
+   * fine", so the stale entries can be reported rather than silently offered.
+   */
   async function resolveRow(row) {
-    const skillFile = joinPath(joinPath(joinPath(rootDir, row.repo), row.relpath), 'SKILL.md')
-    const target = await ctx.fs.resolve(skillFile)
-    const display = target.displayPath
-    const directory = display.slice(0, Math.max(0, display.length - 'SKILL.md'.length))
-    return { directory: directory.replace(/[\\/]+$/, ''), path: display }
+    const joined = joinPath(joinPath(joinPath(rootDir, row.repo), row.relpath), 'SKILL.md')
+    let path = joined
+    let directory = joined.slice(0, Math.max(0, joined.length - 'SKILL.md'.length)).replace(/[\\/]+$/, '')
+    let missing = false
+    try {
+      const target = await ctx.fs.resolve(joined)
+      const display = String(target.displayPath ?? joined)
+      path = display
+      directory = display.slice(0, Math.max(0, display.length - 'SKILL.md'.length)).replace(/[\\/]+$/, '')
+      const info = await ctx.fs.stat(target)
+      missing = info === undefined
+    } catch {
+      missing = true
+    }
+    return { directory, path, missing }
   }
 
   /** Walk up from the session cwd to the directory holding .skill-src/skill-index.tsv. */
@@ -510,13 +556,24 @@ export function buildSkillRouterTools(ctx, register) {
       render(_args, value) {
         const result = isRecord(value) ? value : {}
         const hits = Array.isArray(result.hits) ? result.hits : []
+        // When the strict pass found nothing and the loose pass rescued the query, the
+        // header must not read like a normal result set. "1026 match(es)" for a query that
+        // matched nothing exactly is the misleading case: measured on a 1026-row library,
+        // "make a movie" reported the whole library as matches, every one of them ranked on
+        // words that carry no signal.
+        const loose = Number(result.strict) === 0 && result.fallback === 'or'
+        const weak = result.fallback === 'weak'
+        const headline = loose
+          ? '0 exact match(es); ' + String(result.total) + ' partial match(es) in ' + String(result.library)
+          : weak
+            ? 'no match in ' + String(result.library)
+            : String(result.total) + ' match(es) in ' + String(result.library)
         const lines = [
-          String(result.total) +
-            ' match(es) in ' +
-            String(result.library) +
+          headline +
             '; showing ' +
             String(hits.length) +
-            (result.more === true ? ' (more available)' : ''),
+            (result.more === true ? ' (more available)' : '') +
+            (loose ? ' — no entry contained every keyword, so these match all but one' : ''),
         ]
         for (const hit of hits) {
           lines.push(
@@ -530,8 +587,20 @@ export function buildSkillRouterTools(ctx, register) {
           if (Array.isArray(hit.why)) {
             lines.push('    why: ' + hit.why.join('; '))
           }
+          // A stale row is the one case where the skill cannot be loaded at all, so say it
+          // where the model is choosing, not only when the load fails later.
+          if (hit.stale === true) lines.push('    STALE: SKILL.md is missing — regenerate the index')
         }
         if (String(result.error) !== '') lines.push('error: ' + String(result.error))
+        // The note tells the model to pass `repo` when copies > 1, so the count has to be
+        // visible: the JSON carries it, but the model reads this text, not the JSON.
+        const duplicated = hits.filter((hit) => Number(hit.copies) > 1)
+        const duplicatedRepos = new Set(duplicated.map((hit) => String(hit.repo)))
+        if (duplicated.length > 1 && duplicatedRepos.size > 1) {
+          lines.push(
+            'note: ' + String(duplicated.length) + ' of these are copies of a name that exists in several repos (' + [...duplicatedRepos].join(', ') + '); pass repo to skill_load to choose.',
+          )
+        }
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -551,7 +620,16 @@ export function buildSkillRouterTools(ctx, register) {
       }
       const tokens = tokenize(query)
       if (tokens.length === 0 && repoFilter === '') {
-        return jsonSafe({ library: loaded.root, total: 0, shown: 0, hits: [], error: 'the query must contain at least one letter or digit' })
+        // Latin script only, and that is a property of the index rather than a bug to hide:
+        // a query written in Chinese or Japanese yields no keywords at all. Say what to do
+        // instead of reporting only what went wrong.
+        return jsonSafe({
+          library: loaded.root,
+          total: 0,
+          shown: 0,
+          hits: [],
+          error: 'the query has no searchable keyword — this index is matched on Latin script (letters and digits), so pass keywords in English, e.g. "video render" rather than "做视频"',
+        })
       }
       // Two passes over the same scoring: `all` requires every keyword, `any` accepts a
       // partial match. The strict pass runs first and wins whenever it finds anything, so
@@ -615,10 +693,24 @@ export function buildSkillRouterTools(ctx, register) {
       }
 
       let scored = collect(true)
+      // How many entries contained every keyword — 0 whenever the loose pass is what
+      // produced the results. Reported so the header cannot read like a normal match set.
+      const strict = scored.length
       let fallback = 'none'
       if (scored.length === 0 && tokens.length > 1) {
         scored = collect(false)
         if (scored.length > 0) fallback = 'or'
+        // A loose hit that matched one keyword out of five is not a weaker rescual, it is a
+        // false positive: measured on a 1026-row library, "test setup config helper" pulled
+        // in 1026 entries, most sharing a single common word. A rescue has to at least match
+        // every keyword but one, otherwise saying "found nothing" is the truthful answer.
+        const meaningful = scored.filter((entry) => entry.matchCount >= tokens.length - 1)
+        if (meaningful.length > 0) {
+          scored = meaningful
+        } else if (scored.length > 0) {
+          fallback = 'weak'
+          scored = []
+        }
       }
 
       scored.sort((a, b) => {
@@ -646,6 +738,10 @@ export function buildSkillRouterTools(ctx, register) {
           // model `copies` is worth disambiguating.
           copies: copiesOf(entry.row.name),
           matchCount: entry.matchCount,
+          // A row whose SKILL.md is gone means the index is out of date — the normal
+          // result of deleting a skill directory without regenerating it. Reporting it
+          // here lets the model say so instead of offering a skill that cannot load.
+          stale: located.missing,
           // Only present when the caller asked to explain, so the normal path pays nothing
           // for it. This is the answer to "why did this query match / not match".
           ...(entry.why === undefined ? {} : { score: entry.score, why: entry.why }),
@@ -657,6 +753,7 @@ export function buildSkillRouterTools(ctx, register) {
         library: loaded.root,
         query,
         total: scored.length,
+        strict,
         shown: hits.length,
         names_only: namesOnly,
         more: scored.length > hits.length,
@@ -666,9 +763,13 @@ export function buildSkillRouterTools(ctx, register) {
         explain: explaining,
         note:
           hits.length === 0
-            ? 'No library match. Try broader or different keywords, or drop the repo filter; rerun with explain: true to see how each keyword scored against each field.'
+            ? fallback === 'weak'
+              ? 'Nothing contained every keyword, and the closest partial matches each shared only one of ' +
+                String(tokens.length) +
+                ' — too weak to offer. Search again with fewer or different keywords.'
+              : 'No library match. Try broader or different keywords, or drop the repo filter; rerun with explain: true to see how each keyword scored against each field.'
             : fallback === 'or'
-              ? 'No skill matched every keyword, so these match only some (see matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
+              ? 'No skill matched every keyword, so these match all but one (matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
               : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.',
       })
     },
@@ -684,7 +785,7 @@ export function buildSkillRouterTools(ctx, register) {
     const wanted = normName(raw)
     const wantedLower = wanted.toLowerCase()
     const wantedRepo = String(repoHint ?? '').trim().toLowerCase()
-    const missing = { name: raw, source: '', repo: '', copies: 0, path: '', resourceDir: '', content: '', referenceFiles: [], error: '' }
+    const missing = { name: raw, source: '', repo: '', copies: 0, path: '', resourceDir: '', content: '', referenceFiles: [], stale: false, error: '' }
     if (wanted === '') {
       missing.error = 'a skill name is required'
       return jsonSafe(missing)
@@ -719,7 +820,25 @@ export function buildSkillRouterTools(ctx, register) {
       const winner = candidates[0]
       if (winner !== undefined) {
         chosen = winner
-        directory = (await resolveRow(winner)).directory
+        const resolved = await resolveRow(winner)
+        directory = resolved.directory
+        // The index names this skill but its SKILL.md is gone: the index is out of date.
+        // Say that, rather than letting the read failure below report a raw fs error that
+        // reads like a permissions problem.
+        if (resolved.missing) {
+          missing.path = resolved.path
+          missing.resourceDir = resolved.directory
+          missing.stale = true
+          missing.error =
+            'the index lists "' +
+            wanted +
+            '" at ' +
+            winner.repo +
+            '/' +
+            winner.relpath +
+            ' but its SKILL.md is missing — the index is stale; regenerate it (see the plugin README)'
+          return jsonSafe(missing)
+        }
       }
     }
     if (directory === '' && isSafeName(wantedLower)) directory = await scanForSkill(wantedLower, signal)

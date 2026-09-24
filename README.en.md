@@ -96,7 +96,9 @@ Scoring accumulates per keyword. The weight order reflects information density:
 
 Sort order: all-keywords-match → matched-keyword count → score → name hits → name length → lexicographic (deterministic: the same query always yields the same order).
 
-The default is **strict AND**. When AND returns nothing and there is more than one keyword, the search retries as a **partial match** and sets `fallback: "or"`, labelling each hit with its `matchCount` — **a near-miss is never dressed up as a real hit** — and a single-keyword query never falls back, because there is nothing to degrade to.
+The default is **strict AND**. Only when AND returns nothing and there is more than one keyword does it try a **partial match**, and a candidate must then hit every keyword but one — otherwise it answers "nothing found" and sets `fallback: "weak"`. Partial hits carry `matchCount`, the result carries `strict: 0`, and even the header the model reads says "0 exact match(es); N partial match(es)": **a near-miss is never dressed up as a real hit**. A single-keyword query never falls back, because there is nothing to degrade to.
+
+> That threshold was forced by measurement. On the 1026-row reference library, `test setup config helper` used to return **1026 entries**, nearly all of them sharing one common word; tightened, it returns **7**. In the same experiment `make a movie` matched the whole library on `make` and `a`, so words with no discriminative power — `a`, `the`, `make`, `use` — are dropped during tokenization (`STOP_WORDS` in `tokenize`).
 
 With `explain: true` the score breakdown shows why something did or did not match:
 
@@ -293,7 +295,9 @@ Keywords are lowercased and matched with weights across `name` / `whenToUse` / `
 | `names_only` | boolean | names and repos only, no descriptions (about 60% smaller) |
 | `explain` | boolean | also return the score breakdown per hit, for diagnosis |
 
-Returns `total`, `shown`, `more`, `fallback`, and per hit: `name`, `repo`, `description`, `copies`, `matchCount`, `whenToUse`, `files`, `path`, `libraryRelative`; with `explain` also `score` and `why`.
+Returns `total`, `strict`, `shown`, `more`, `fallback`, and per hit: `name`, `repo`, `description`, `copies`, `matchCount`, `stale`, `whenToUse`, `files`, `path`, `libraryRelative`; with `explain` also `score` and `why`.
+
+`stale: true` means the index has the row but its `SKILL.md` is gone — the library changed and the index was not regenerated. Such rows do **not** make the search fail (an earlier version threw `ENOENT`, so one stale row took down the whole retrieval); they are flagged instead, and the flag is visible to the model.
 
 ### `skill_load`
 
@@ -340,7 +344,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Fourteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Fifteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -355,6 +359,7 @@ Fourteen dependency-free scripts. They run against a real staged library when on
 | `index-format.mjs` | the index-format contract: 6- and 7-column files both parse, the header is found by shape, the live index still works |
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
+| `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
@@ -367,7 +372,7 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `
 host.js                       the plugin: apply(), buildSkillRouterTools(), definePortableTool()
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         fourteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         fifteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
 .github/workflows/            CI: npm test on Linux and Windows, Node 20 / 22 / 24

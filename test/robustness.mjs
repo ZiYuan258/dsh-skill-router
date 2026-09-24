@@ -42,8 +42,12 @@ check('hits carry a matchCount', exact.hits.every((hit) => typeof hit.matchCount
 const loose = await search.execute({ query: 'widgets beta' }, exec)
 check('no all-keyword match falls back to OR', loose.fallback === 'or', 'fallback=' + loose.fallback)
 check('OR fallback still returns candidates', loose.hits.length > 0, 'got ' + loose.hits.length)
+// The loose pass used to admit anything sharing a single keyword, which on a 1026-row
+// library meant "test setup config helper" returned 1026 entries. It now admits only what
+// matches every keyword but one, so a candidate here must share one of the two keywords.
 check('OR fallback labels partial matches', loose.hits.every((hit) => hit.matchCount < 2), JSON.stringify(loose.hits.map((h) => h.matchCount)))
-check('OR fallback explains itself', String(loose.note).includes('match only some'), String(loose.note))
+check('OR fallback is reported as an exact count of zero', loose.strict === 0, 'strict=' + loose.strict)
+check('OR fallback explains itself', String(loose.note).includes('match all but one'), String(loose.note))
 
 const single = await search.execute({ query: 'nonexistentword' }, exec)
 check('a single keyword never reports OR fallback', single.fallback === 'none' && single.hits.length === 0, 'fallback=' + single.fallback)
