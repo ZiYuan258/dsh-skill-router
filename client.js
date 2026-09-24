@@ -42,13 +42,24 @@
 //     and any count is partial until `hasMore` becomes false.
 //   • The window is bounded — observed capped between ~1,664 and ~1,900 entries, and seen
 //     resetting from 3,336 down to 1,664. Entries can therefore fall OUT of the window after
-//     having been read. So the ledger accumulates what it has read instead of re-deriving the
-//     list from the window on every render, and it merges by `callId`.
+//     having been read, and a page can SLIDE (constant length, content moving older) rather than
+//     grow. So the ledger accumulates what it has read, and every page is folded in at the moment
+//     it is read, not when a notification happens to arrive.
 //
-// `callId` is the identity of a call, not `seq` and not the array position: the same call is
-// re-delivered on every later snapshot, so anything else would count one load many times.
-// One call may name several skills (`name` or `names`), and the display row is
-// `callId + normalized skill name`, so `A+B` yields two rows but one call.
+// ── identity: the event, not the pairing id ─────────────────────────────────────────────
+//
+// The ROW key is `eventKey::normalized skill`, and the CALL count groups by `eventKey`. The
+// event's identity is its `seq` — `SessionEvent` declares `seq: SessionSeq` on the envelope of
+// every event, so it is contractually unique, and one `tool/call` event is exactly one call.
+//
+// `callId` is the tool call's PAIRING id (it matches a call to its result), and nothing in the
+// contract says two different calls cannot share one. Deduping on it held on every session
+// observed, but "held so far" is not "cannot differ", and the failure would be silent: two real
+// calls collapsing into one row and a count that is quietly low. `seq` costs nothing extra and
+// carries the stronger guarantee, so it decides identity; `callId` remains what it is — a pairing
+// id, used only as a fallback token when an event carries no numeric `seq`.
+//
+// One call may name several skills (`name` or `names`), so `A+B` yields two rows but one call.
 //
 // `test/usage-ledger.mjs` pins all of this against the real shapes, and loads this file the
 // way the browser does (see below) rather than importing it.
@@ -395,13 +406,13 @@ window.__ModuleLoader__.load({
      *
      * `previous` is what makes the bounded window safe. A later snapshot re-contains the events
      * already read, and may also have LOST entries off the old end; merging by
-     * `callId + normalized name` means a re-delivered call contributes nothing new while an
+     * `eventKey + normalized name` means a re-delivered event contributes nothing new while an
      * evicted one stays counted.
      */
     function buildLedger(source, options) {
       const opts = options === null || typeof options !== 'object' ? {} : options
       const files = []
-      // Rows are keyed by `callId::skill`. Re-reading a page must add neither a row nor a call.
+      // Rows are keyed by `eventKey::skill`. Re-reading a page must add neither a row nor a call.
       const seen = {}
 
       const take = (record) => {
@@ -418,11 +429,23 @@ window.__ModuleLoader__.load({
       if (opts.previous !== null && typeof opts.previous === 'object' && Array.isArray(opts.previous.files)) {
         for (let i = 0; i < opts.previous.files.length; i += 1) {
           const carried = opts.previous.files[i]
-          // Normalise `seq` on the way in: a carried record from an older build (or one whose event
-          // had no numeric seq) must not poison the sort with NaN, which would compare false in
-          // both directions and scramble the list unpredictably.
-          if (typeof carried.seq !== 'number' || Number.isFinite(carried.seq) === false) carried.seq = Number.MAX_SAFE_INTEGER
-          take(carried)
+          // A COPY, not the record itself. This function documents itself as pure and total, and
+          // assigning into `carried` contradicted that by reaching into a caller's object —
+          // harmless while those records are internal ledger data, and still a lie in the contract.
+          // Normalisation also protects the sort: a record whose event had no numeric `seq` must
+          // not poison it with NaN, which compares false in both directions and scrambles the list.
+          const seq = typeof carried.seq === 'number' && Number.isFinite(carried.seq) ? carried.seq : Number.MAX_SAFE_INTEGER
+          take({
+            id: carried.id,
+            // `eventKey` is carried too: it is what the call count groups on. A record from an
+            // older build has only `callId`, so fall back to it rather than losing the grouping.
+            eventKey: carried.eventKey === undefined ? 'call:' + String(carried.callId) : carried.eventKey,
+            skill: carried.skill,
+            tool: carried.tool,
+            turn: carried.turn,
+            step: carried.step,
+            seq,
+          })
         }
       }
 
@@ -434,24 +457,43 @@ window.__ModuleLoader__.load({
         if (String(event.type) !== 'tool/call') continue
         const data = event.data !== null && typeof event.data === 'object' ? event.data : undefined
         if (data === undefined) continue
-        const callId = String(data.callId === null || data.callId === undefined ? '' : data.callId)
-        if (callId === '') continue
         const tool = String(data.name === null || data.name === undefined ? '' : data.name)
         if (LOAD_TOOLS[tool] !== true) continue
         const args = argsOf(data.arguments)
         if (args === undefined) continue
+        const callId = String(data.callId === null || data.callId === undefined ? '' : data.callId)
+
+        // ── identity ───────────────────────────────────────────────────────────────────────────
+        //
+        // The ROW identity is the EVENT's identity plus the skill, and the event's identity is its
+        // `seq`. `SessionEvent` declares `seq: SessionSeq` on the envelope of every event
+        // (`{ type: K; seq: SessionSeq; time: number; data: SessionEventMap[K] }`), so it is
+        // contractually unique per event — and one `tool/call` event is exactly one call.
+        //
+        // `callId` is the tool call's pairing id, which is a weaker guarantee: it pairs a call with
+        // its result, and nothing in the contract says two different calls cannot share one. This
+        // file deduped on it for several versions and it held on every live session observed — but
+        // "held so far" is not "cannot differ", and the cost of being wrong is silent: two genuinely
+        // different calls collapse into one row and the count is quietly low, which is the kind of
+        // error this tab exists to prevent.
+        //
+        // When the event carries no numeric `seq` (an older ledger shape, or a redelivery that
+        // dropped it), the pair (position in this window, callId) is used instead. That is enough to
+        // deduplicate the pages that produce it, which is all the row key has to do.
+        const seq = typeof event.seq === 'number' && Number.isFinite(event.seq) ? event.seq : undefined
+        const eventKey = seq !== undefined ? 'seq:' + String(seq) : 'idx:' + String(i) + ':' + callId
+
         const raw = tool === 'skill_load' ? splitNames(args.name).concat(splitNames(args.names)) : splitNames(args.name)
         let kept = 0
         for (let n = 0; n < raw.length && kept < MAX_NAMES; n += 1) {
           const skill = normalizeSkillName(raw[n])
           if (skill === '') continue
           kept += 1
-          // `seq` is carried for ORDERING, not identity. Events arrive newest-first (page 0 is the
-          // recent end) and older pages are prepended as they are fetched, so insertion order is
-          // the reverse of the session's — a live report listed turn 31 above turn 5. `seq` is the
-          // conversation's own monotonic counter, so sorting by it reads as a timeline no matter
-          // what order the pages arrive in.
-          take({ id: callId + '::' + skill, callId, skill, tool, turn: data.turn, step: data.step, seq: typeof event.seq === 'number' ? event.seq : Number.MAX_SAFE_INTEGER })
+          // `seq` is ALSO carried for ordering. Events arrive newest-first (page 0 is the recent
+          // end) and older pages are prepended as they are fetched, so insertion order is the
+          // reverse of the session's — a live report listed turn 31 above turn 5. Sorting by `seq`
+          // reads as a timeline no matter what order the pages arrive in.
+          take({ id: eventKey + '::' + skill, eventKey, skill, tool, turn: data.turn, step: data.step, seq: seq === undefined ? Number.MAX_SAFE_INTEGER : seq })
         }
       }
 
@@ -462,13 +504,16 @@ window.__ModuleLoader__.load({
       // The call count is DERIVED from the records that actually survived, never accumulated
       // alongside them.
       //
-      // It used to be a counter incremented on the first row a callId contributed, which made
-      // "calls" and "rows" two independently maintained answers to questions about the same set —
-      // and a live report showed them disagreeing (18 rows against 17 calls). Two sources for one
-      // fact can drift; one source cannot. Deriving it also makes the invariants structural:
+      // It used to be a counter incremented on the first row a call contributed, which made "calls"
+      // and "rows" two independently maintained answers to questions about the same set — and a live
+      // report showed them disagreeing (18 rows against 17 calls). Two sources for one fact can
+      // drift; one source cannot. Deriving it also makes the invariants structural:
       // `calls <= files.length`, and equality exactly when no call named more than one skill.
+      //
+      // Grouped by `eventKey`, not `callId`: one event is one call by contract, whereas a shared
+      // `callId` across two events would silently merge two real calls into one and undercount.
       const byCall = {}
-      for (let i = 0; i < files.length; i += 1) byCall[files[i].callId] = true
+      for (let i = 0; i < files.length; i += 1) byCall[files[i].eventKey] = true
       const calls = Object.keys(byCall).length
 
       // When one call produced more than one row, name WHICH one and what it named.
@@ -476,19 +521,17 @@ window.__ModuleLoader__.load({
       // A live report showed `18 行/17 次调用` — legitimate on its face, since one call may name
       // several skills, but nothing in the row list looked like such a call, and the only way to
       // find out was to keep asking. Now that `calls` is derived, any disagreement PROVES a
-      // multi-name call exists, so the ledger can name it: `callId[skill|skill]`. Print the
-      // evidence rather than the question.
+      // multi-name call exists, so the ledger can name it. Print the evidence, not the question.
       const multi = {}
       if (files.length > calls) {
         for (let i = 0; i < files.length; i += 1) {
           const file = files[i]
-          multi[file.callId] = multi[file.callId] === undefined ? file.skill : multi[file.callId] + '|' + file.skill
+          multi[file.eventKey] = multi[file.eventKey] === undefined ? file.skill : multi[file.eventKey] + '|' + file.skill
         }
       }
-      const multiNote = Object.keys(multi)
-        .filter((callId) => multi[callId].indexOf('|') >= 0)
-        .map((callId) => callId + '[' + multi[callId] + ']')
-        .join(' ')
+      const multiKeys = Object.keys(multi).filter((eventKey) => multi[eventKey].indexOf('|') >= 0)
+      const multiNote = multiKeys.map((eventKey) => eventKey + '[' + multi[eventKey] + ']').join(' ')
+      const multiCalls = multiKeys.length
 
       // `hasMore` is true on the newest page, so "complete" cannot be assumed from a full
       // window — it is only ever reached by paging to the start.
@@ -526,7 +569,7 @@ window.__ModuleLoader__.load({
         // than puzzling — a live report spent a whole round trip on exactly that question.
         multiNote,
         // How many calls named more than one skill: the number the header explains with.
-        multiCalls: Object.keys(multi).filter((callId) => multi[callId].indexOf('|') >= 0).length,
+        multiCalls,
         page: typeof opts.page === 'number' ? opts.page : 0,
         error: opts.error === undefined ? null : opts.error,
       }
@@ -589,6 +632,24 @@ window.__ModuleLoader__.load({
       return { entries, hasMore: source.hasMore === true }
     }
 
+    /** The `seq` of an entry, or undefined when it carries none. */
+    function seqOf(entry) {
+      if (entry === null || typeof entry !== 'object') return undefined
+      const event = entry.event !== null && typeof entry.event === 'object' ? entry.event : entry
+      return typeof event.seq === 'number' && Number.isFinite(event.seq) ? event.seq : undefined
+    }
+
+    /** The smallest `seq` in a window — the marker of how far back it reaches. */
+    function oldestSeqOf(entries) {
+      let oldest
+      for (let i = 0; i < entries.length; i += 1) {
+        const seq = seqOf(entries[i])
+        if (seq === undefined) continue
+        if (oldest === undefined || seq < oldest) oldest = seq
+      }
+      return oldest
+    }
+
     /**
      * Merge the current window into what has already been read.
      *
@@ -619,8 +680,8 @@ window.__ModuleLoader__.load({
     /**
      * The tab's reader: subscribe to the ledger, page backwards, stay bounded.
      *
-     * Returns `{ ledger, loading, page, error }`. `ledger` carries `files` (one row per
-     * callId+skill), `calls` (callIds), `uniqueSkills` (distinct names) and `completeness`.
+     * Returns `{ ledger, loading, page, error, ...diagnostics }`. `ledger` carries `files` (one row
+     * per event+skill), `calls` (distinct events), `uniqueSkills` (distinct names) and `completeness`.
      */
     function useUsageLedger(props) {
       const input = props === null || props === undefined ? {} : props
@@ -655,6 +716,25 @@ window.__ModuleLoader__.load({
       const gaveUpRef = React.useRef(false)
       /** Largest window length observed, so "did the read move anything" survives across retries. */
       const seenRef = React.useRef(0)
+      /**
+       * The smallest `seq` ever seen in the window — the real marker of how far back paging reaches.
+       *
+       * Window LENGTH is not a valid progress signal, and this was a live structural risk: the
+       * session window is bounded (~1,664–1,900 observed, with a 3,336 → 1,664 reset seen), so a
+       * page can slide entirely toward older history while its length stays equal. `after.length >
+       * before.length` is then false for a genuinely successful read, two of those in a row ended
+       * paging with "无进展停止" at page 0, and the tab quietly reported a partial history as if it
+       * had given up on real data.
+       *
+       * The trustworthy signal is the window's OLDEST `seq` decreasing: that can only happen by
+       * acquiring older history. Length is kept as a secondary check because the window may also
+       * grow without the oldest edge moving — both mean the read moved something.
+       *
+       * `test/usage-tab.mjs` builds a true sliding window (constant capacity, content shifting
+       * older each page) that reproduces the stall; before this change it reported 第 0 页 ·
+       * 无进展停止.
+       */
+      const oldestRef = React.useRef(undefined)
       /**
        * The paging watchdog's handle, held OUTSIDE the effect that starts it.
        *
@@ -790,12 +870,14 @@ window.__ModuleLoader__.load({
         DIAG.effectRuns += 1
         if (gaveUpRef.current === true) return undefined
         const before = windowOf(source.getSnapshot())
-        // The largest window seen so far, remembered across retries. Comparing against the
-        // effect's opening snapshot is not enough: when a retry does bring a page, the snapshot
-        // has already grown by then, so `after > before` is satisfied by the PREVIOUS attempt's
-        // page and the retry that actually produced it would be judged a no-op. (A test caught
-        // exactly that.) A retry that sees anything new is progress, not a stall.
+        // Both markers of "how far back this window reaches" are remembered across retries, not
+        // compared against this effect's opening snapshot: when a retry does bring a page, the
+        // snapshot has already moved by then, so a comparison against the opening value would
+        // credit the PREVIOUS attempt's page and judge the retry that produced it a no-op. (A test
+        // caught exactly that.) A retry that sees anything new is progress, not a stall.
         if (before.entries.length > seenRef.current) seenRef.current = before.entries.length
+        const oldestBefore = oldestSeqOf(before.entries)
+        if (oldestBefore !== undefined && (oldestRef.current === undefined || oldestBefore < oldestRef.current)) oldestRef.current = oldestBefore
         if (before.hasMore === false) {
           // Nothing to page. The initial state cannot know that — it is seeded as "reading" so the
           // first paint already says so instead of showing an unfinished count — so the deadline is
@@ -854,9 +936,29 @@ window.__ModuleLoader__.load({
               return
             }
             const after = windowOf(source.getSnapshot())
-            if (after.entries.length > seenRef.current) {
-              // The window actually grew: that is a page read, whatever the promise said.
-              seenRef.current = after.entries.length
+            const oldestAfter = oldestSeqOf(after.entries)
+            // Progress is "the window reaches further back", measured on the OLDEST `seq` first,
+            // because a bounded window slides: its length can stay equal while its whole content
+            // moves older, and a length-only test calls that a no-op. Growth is the secondary
+            // signal — a page that arrives without moving the oldest edge (a live append racing
+            // the read, say) still moved something, so it counts too.
+            const reachedOlder = oldestAfter !== undefined && (oldestRef.current === undefined || oldestAfter < oldestRef.current)
+            if (reachedOlder || after.entries.length > seenRef.current) {
+              if (oldestAfter !== undefined && (oldestRef.current === undefined || oldestAfter < oldestRef.current)) oldestRef.current = oldestAfter
+              if (after.entries.length > seenRef.current) seenRef.current = after.entries.length
+              // FOLD THE PAGE IN NOW, while it is still on screen.
+              //
+              // The accumulator used to be written only by `push()` — i.e. only when the source
+              // notified. That is fine while events stream, and wrong the moment they do not: a
+              // page that arrives, is rendered, and then slides out of the bounded window before
+              // the next notification was never accumulated at all, so a record could be visible
+              // for one frame and then gone forever. A true sliding window (constant length,
+              // content moving older) makes that the normal case rather than a race, which is how
+              // the test caught it.
+              //
+              // Reading the window here is what "read a page" has to mean: the bytes are in hand
+              // exactly once, and this is the only line that is guaranteed to run with them.
+              seedRef.current = buildLedger(after.entries, { previous: seedRef.current, hasMore: after.hasMore })
               pageRef.current += 1
               conclude({ page: pageRef.current, error: null })
               return
@@ -1063,7 +1165,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.9.0'
+    const VERSION = '1.9.1'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)

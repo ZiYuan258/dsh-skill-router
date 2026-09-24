@@ -772,5 +772,43 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   check('第二次装载会新增订阅，且取消靠返回值而非不存在的方法', source.listenerCount === before + 1, 'listeners=' + source.listenerCount)
 }
 
+// --- 12. 有界窗口如果是「滑窗」，滑动的分页不得被判成无进展 ----------------------
+//
+// 这是审查指出的结构性风险，而且我自己在夹具里一直避开了它：**每一页都在变长**。真实的
+// `SessionEventWindow` 是有上限的（README 记的实测约 1664–1900，且见过 3336 → 1664 回落），
+// 所以完全可能出现「长度不变、内容整体向更早方向滑动」的一页。
+//
+// 用**长度**判断「有没有读到更早的东西」是个错误的代理指标；正确的判据是最老那一条的 `seq`
+// 是否变小。下面的夹具构造真正的滑窗：容量恒定，每次翻页把窗口整体向更早方向移动半窗。
+{
+  const windowSize = 40
+  const history = []
+  for (let seq = 1; seq <= 400; seq += 1) {
+    history.push(entry(seq === 120 ? call('deep', 'skill_load', { name: 'semgrep' }, seq) : { type: 'step/start', seq, time: 1, data: {} }))
+  }
+  let start = history.length - windowSize
+  const sliding = {
+    getSnapshot: () => ({ entries: history.slice(start, start + windowSize), hasMore: start > 0, revision: start }),
+    subscribe: () => () => {},
+    session: {
+      loadOlder: () => {
+        start = Math.max(0, start - Math.floor(windowSize / 2))
+        return Promise.resolve()
+      },
+    },
+  }
+  const { fake, Component, propsFor } = mount({ source: sliding, session: sliding.session })
+  const props = propsFor('s1')
+  const first = textOf(fake.render(Component, props))
+  check('滑窗首屏：窗口有内容，但深埋的技能还看不见', first.indexOf('semgrep') < 0, first.slice(0, 160))
+  check('滑窗首屏：长度恒定（不能用长度当进展判据）', sliding.getSnapshot().entries.length === windowSize)
+  await settle(fake, Component, props)
+  const text = textOf(fake.render(Component, props))
+  // 关键：长度恒定的滑动必须算作有进展，并一路翻到最早一条。
+  check('滑窗分页不被误判成无进展（翻到深埋的技能）', text.indexOf('semgrep') >= 0, text.slice(-300))
+  check('滑窗一路翻到底后报告完整', text.indexOf('已读完') >= 0, text.slice(-200))
+  check('滑窗结束后不再声称读取中', text.indexOf('读取中') < 0, text.slice(-200))
+}
+
 console.log(problems.length === 0 ? '\n标签页接线: OK' : '\n标签页接线 FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

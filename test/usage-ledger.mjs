@@ -54,7 +54,13 @@ const { buildLedger, normalizeSkillName, splitNames } = internals
 const names = (ledger) => ledger.files.map((file) => file.skill)
 
 /** 一条会话事件，形状照抄实测的 tool/call。 */
-const call = (callId, name, args, seq) => ({ type: 'tool/call', seq: seq === undefined ? 1 : seq, time: 1, data: { turn: 1, step: 1, callId, name, arguments: args } })
+let seqCounter = 0
+// `seq` 在真实事件里是会话级单调计数器，每条事件各不相同。夹具必须照抄这一点：
+// 早先默认所有事件都用 seq=1，于是"两个不同 callId"在事件身份上成了同一条事件。
+const call = (callId, name, args, seq) => {
+  seqCounter += 1
+  return { type: 'tool/call', seq: seq === undefined ? seqCounter : seq, time: 1, data: { turn: 1, step: 1, callId, name, arguments: args } }
+}
 const other = (type, seq) => ({ type, seq: seq === undefined ? 2 : seq, time: 1, data: {} })
 const entries = (list) => list.map((event) => ({ type: 'event', event }))
 
@@ -76,8 +82,12 @@ const rawArgs = buildLedger(entries([call('c6', 'skill_load', '{"name":"gh-cli"}
 check('arguments 为 JSON 字符串时同样识别', names(rawArgs).join() === 'gh-cli', JSON.stringify(names(rawArgs)))
 
 // --- 2. callId 是事件身份：同一调用跨分页只算一次 --------------------------------
-const twice = buildLedger(entries([call('same', 'skill_load', { name: 'gh-cli' }), call('same', 'skill_load', { name: 'gh-cli' })]), {})
-check('同一 callId 只计一次（跨分页重复不产生 A B A）', twice.calls === 1 && twice.files.length === 1, 'calls=' + twice.calls + ' rows=' + twice.files.length)
+const twice = buildLedger(entries([call('same', 'skill_load', { name: 'gh-cli' }, 700), call('same', 'skill_load', { name: 'gh-cli' }, 700)]), {})
+check('同一条事件被投递两次只计一次（跨分页重复不产生 A B A）', twice.calls === 1 && twice.files.length === 1, 'calls=' + twice.calls + ' rows=' + twice.files.length)
+// (2) 上游边界：两条**不同**事件共用同一个 callId（比如网关或模型让不同调用拿到同一个
+//     tool-call 配对 id）。按事件身份计数，它们必须算两次——若按 callId 去重就会静默少算一次。
+const sharedId = buildLedger(entries([call('collide', 'skill_load', { name: 'gh-cli' }, 800), call('collide', 'skill_load', { name: 'semgrep' }, 900)]), {})
+check('不同事件共用同一 callId 时仍算两次调用（不静默少算）', sharedId.calls === 2 && sharedId.files.length === 2, 'calls=' + sharedId.calls + ' rows=' + sharedId.files.length)
 const distinct = buildLedger(entries([call('c1', 'skill_load', { name: 'gh-cli' }), call('c2', 'skill_load', { name: 'gh-cli' })]), {})
 check('两个不同 callId 加载同一技能：2 次调用、1 个唯一技能', distinct.calls === 2 && distinct.uniqueSkills === 1, 'calls=' + distinct.calls + ' unique=' + distinct.uniqueSkills)
 
@@ -133,8 +143,8 @@ check('累积后完整性变为 complete', second.completeness === 'complete', s
 check('调用计数在合并后仍然正确', second.calls === 2, 'calls=' + second.calls)
 
 // --- 7. live append：同一份累积状态喂入新事件，立即出现 --------------------------
-const liveFirst = buildLedger(entries([call('c1', 'skill_load', { name: 'a-b' })]), { hasMore: true })
-const liveSecond = buildLedger(entries([call('c1', 'skill_load', { name: 'a-b' }), call('c2', 'skill', { name: 'c-d' })]), { hasMore: true, previous: liveFirst })
+const liveFirst = buildLedger(entries([call('c1', 'skill_load', { name: 'a-b' }, 300)]), { hasMore: true })
+const liveSecond = buildLedger(entries([call('c1', 'skill_load', { name: 'a-b' }, 300), call('c2', 'skill', { name: 'c-d' }, 301)]), { hasMore: true, previous: liveFirst })
 check('新事件 append 后立即可见', names(liveSecond).join() === 'a-b,c-d', JSON.stringify(names(liveSecond)))
 check('live 追加不重复已有记录', liveSecond.calls === 2 && liveSecond.files.length === 2, 'calls=' + liveSecond.calls)
 
@@ -149,7 +159,7 @@ for (const weird of [undefined, null, 'x', 42, {}, [null, 7, 'x'], entries([null
   }
   check('坏输入返回账本而非抛错: ' + JSON.stringify(weird), threw === undefined && value !== undefined && Array.isArray(value.files), threw === undefined ? undefined : String(threw))
 }
-check('缺 callId 的调用被跳过（无法去重就不能计数）', buildLedger(entries([call('', 'skill_load', { name: 'x' })]), {}).calls === 0)
+check('缺 callId 的调用仍被记录（身份来自事件，不再依赖 callId）', buildLedger(entries([call('', 'skill_load', { name: 'x' })]), {}).calls === 1)
 check('arguments 为 null 的调用被跳过', buildLedger(entries([call('c', 'skill_load', null)]), {}).calls === 0)
 check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && splitNames(42).join() === '42' && splitNames(['a', null, '', 'a']).join() === 'a', JSON.stringify(splitNames(['a', null, '', 'a'])))
 
