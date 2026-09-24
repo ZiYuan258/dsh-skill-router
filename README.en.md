@@ -340,7 +340,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Thirteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Fourteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -354,6 +354,7 @@ Thirteen dependency-free scripts. They run against a real staged library when on
 | `skill-ref.mjs` | path containment including `../` traversal attempts, listing, missing files |
 | `index-format.mjs` | the index-format contract: 6- and 7-column files both parse, the header is found by shape, the live index still works |
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
+| `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
@@ -366,7 +367,7 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `
 host.js                       the plugin: apply(), buildSkillRouterTools(), definePortableTool()
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         thirteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         fourteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
 .github/workflows/            CI: npm test on Linux and Windows, Node 20 / 22 / 24
