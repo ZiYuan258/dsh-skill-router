@@ -170,5 +170,26 @@ check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && spl
   check('缺 seq 的记录排在最后而不是最前', names(noSeq).join() === 'has-seq,no-seq', JSON.stringify(names(noSeq)))
 }
 
+// --- 10. 计数与行数必须结构上一致 ------------------------------------------------
+//
+// 真机报告里出现过「18 行 / 17 次调用」这样的组合。原因是 calls 曾经是一个**独立累加**的计数器，
+// 而 files 由键去重决定——同一个事实有两个来源，就能漂移。现在 calls 从最终记录派生，于是
+// `calls <= rows` 永远成立，且仅当没有一次调用点名多个技能时取等号。
+{
+  const one = buildLedger(entries([call('a', 'skill_load', { name: 'x' }, 1), call('b', 'skill_load', { name: 'y' }, 2)]), {})
+  check('每次调用一个技能时 行数 == 调用数', one.files.length === 2 && one.calls === 2, 'rows=' + one.files.length + ' calls=' + one.calls)
+  const two = buildLedger(entries([call('a', 'skill_load', { names: 'x,y' }, 1), call('b', 'skill_load', { name: 'z' }, 2)]), {})
+  check('一次调用点名两个技能时 调用数 < 行数', two.files.length === 3 && two.calls === 2, 'rows=' + two.files.length + ' calls=' + two.calls)
+  // 跨页重复投递 + 参数形态不同：仍然只算一次调用，也只留一行。
+  const p1 = buildLedger(entries([call('a', 'skill_load', '{"name":"x"}', 1)]), { hasMore: true })
+  const p2 = buildLedger(entries([call('a', 'skill_load', { name: 'x' }, 1)]), { hasMore: false, previous: p1 })
+  check('重复投递不增加行数也不增加调用数', p2.files.length === 1 && p2.calls === 1, 'rows=' + p2.files.length + ' calls=' + p2.calls)
+  // 被 MAX_NAMES 截掉的名字不得留下一个"有名无行"的调用。
+  const capped = buildLedger(entries([call('a', 'skill_load', { names: 'n1,n2,n3,n4,n5,n6,n7,n8,n9' }, 1)]), {})
+  check('被截断的名字不影响行数与调用数的一致性', capped.files.length === 8 && capped.calls === 1, 'rows=' + capped.files.length + ' calls=' + capped.calls)
+  const none = buildLedger(entries([call('a', 'skill_load', { name: '///' }, 1), call('b', 'skill_load', { name: 'ok' }, 2)]), {})
+  check('没有可用名字的调用不计入调用数', none.calls === 1 && none.files.length === 1, 'rows=' + none.files.length + ' calls=' + none.calls)
+}
+
 console.log(problems.length === 0 ? '\n技能账本: OK' : '\n技能账本 FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

@@ -401,21 +401,13 @@ window.__ModuleLoader__.load({
     function buildLedger(source, options) {
       const opts = options === null || typeof options !== 'object' ? {} : options
       const files = []
-      // Rows are keyed by `callId::skill`; calls by `callId` alone. Two maps, because they
-      // answer different questions and dedupe differently: a call that names A and B is one
-      // call and two rows, and re-reading a page must add neither.
+      // Rows are keyed by `callId::skill`. Re-reading a page must add neither a row nor a call.
       const seen = {}
-      const counted = {}
-      let calls = 0
 
       const take = (record) => {
         if (seen[record.id] === true) return false
         seen[record.id] = true
         files.push(record)
-        if (counted[record.callId] !== true) {
-          counted[record.callId] = true
-          calls += 1
-        }
         return true
       }
       // The prior files are replayed rather than added: `take` rebuilds both keys from the
@@ -454,9 +446,6 @@ window.__ModuleLoader__.load({
           const skill = normalizeSkillName(raw[n])
           if (skill === '') continue
           kept += 1
-          // `take` counts the call on the first row it accepts, so a call naming nothing
-          // usable stays uncounted and a re-delivered call stays counted once.
-          //
           // `seq` is carried for ORDERING, not identity. Events arrive newest-first (page 0 is the
           // recent end) and older pages are prepended as they are fetched, so insertion order is
           // the reverse of the session's — a live report listed turn 31 above turn 5. `seq` is the
@@ -469,6 +458,18 @@ window.__ModuleLoader__.load({
       // Oldest first, so the list reads as the session did. A record with no numeric `seq` sorts
       // last rather than jumping the queue.
       files.sort((a, b) => a.seq - b.seq)
+
+      // The call count is DERIVED from the records that actually survived, never accumulated
+      // alongside them.
+      //
+      // It used to be a counter incremented on the first row a callId contributed, which made
+      // "calls" and "rows" two independently maintained answers to questions about the same set —
+      // and a live report showed them disagreeing (18 rows against 17 calls). Two sources for one
+      // fact can drift; one source cannot. Deriving it also makes the invariants structural:
+      // `calls <= files.length`, and equality exactly when no call named more than one skill.
+      const byCall = {}
+      for (let i = 0; i < files.length; i += 1) byCall[files[i].callId] = true
+      const calls = Object.keys(byCall).length
 
       // `hasMore` is true on the newest page, so "complete" cannot be assumed from a full
       // window — it is only ever reached by paging to the start.
@@ -1029,7 +1030,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.8.1'
+    const VERSION = '1.8.2'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
