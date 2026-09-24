@@ -30,6 +30,18 @@ console.log('发版一致性:')
 const clientVersion = (read('client.js').match(/const VERSION\s*=\s*'([^']+)'/) || [])[1]
 ok('package.json 与 client.js 的版本号一致', clientVersion === pkg.version, 'client=' + String(clientVersion) + ' package=' + String(pkg.version))
 
+// --- README 里印出来的版本示例必须与代码一致 -------------------------------------
+//
+// 这一条来自一次真实的漂移：README 里演示标签页输出的 `dsh-skill-router v1.9.0 · …` 停在旧版本，
+// 而它恰恰是用来回答"浏览器跑的是哪一版"的那一行——一份写着过时版本的文档，比不写更容易误导。
+// 只钉版本号：README 的其余措辞仍在演进，不该被一条测试冻住。
+const versionExamples = []
+for (const file of ['README.md', 'README.en.md']) {
+  for (const m of read(file).matchAll(/dsh-skill-router v(\d+\.\d+\.\d+)/g)) versionExamples.push({ file, version: m[1] })
+}
+const staleExamples = versionExamples.filter((e) => e.version !== clientVersion)
+ok('README 里的版本示例与代码一致（' + versionExamples.length + ' 处）', versionExamples.length > 0 && staleExamples.length === 0, staleExamples.map((e) => e.file + ' 写着 v' + e.version).join('; '))
+
 // --- 每个已发布的正式版本都要有发布说明（历史版本各有一份，见 docs/）--------------
 const notes = readdirSync(root + 'docs').filter((n) => /^release-notes-v.+\.md$/.test(n))
 const badHeading = []

@@ -343,7 +343,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -363,7 +363,7 @@ inject: (sessionId, binding) => {
 | `eventSource` can page | ❌ `SessionEventSource = ObservableSnapshot<SessionEventWindow>` — **only `getSnapshot()` and `subscribe()`** |
 | Then how is older history read | ✅ `loadOlder(): Promise<void>` is on the **`session`** (`SessionFace extends ISession`), which is also how the shipped trajectory tab calls it |
 | Subscriptions are cancelled with `unsubscribe()` | ❌ No such method; cancelling is the **return value of `subscribe(fn)`** |
-| Where `turn` / `callId` come from | ✅ `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }` (measured, not inferred) |
+| Where `turn` / `callId` come from | ✅ `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }` (measured, not inferred). **Identity is the envelope's `seq`, not `callId`** |
 
 **It reads the whole history, and says only what it knows.** The ledger window is **bounded** (observed ~1,664–1,900, seen resetting 3,336 → 1,664) and `hasMore` is **true on the newest page**, so page 0 is the recent end — a skill loaded five pages back is invisible until paging reaches it. The tab backfills to the oldest record in the session (43 pages in practice), and:
 
@@ -373,15 +373,26 @@ inject: (sessionId, binding) => {
 
 **Why the row count and the call count can differ.** This is **correct**, not double counting:
 
-- rows dedupe on `callId + normalized name`, so **one call naming several skills becomes several rows** (in practice a single `skill_load` loaded both `code-review-and-quality` and `gh-cli`);
+- the row key is **`event identity + normalized name`** and the call count groups by event identity, so **one call naming several skills becomes several rows** (in practice a single `skill_load` loaded both `code-review-and-quality` and `gh-cli`);
+- the event identity is the **`seq`** on the event envelope (`SessionEvent` declares `seq: SessionSeq` on every event, so it is contractually unique, and one `tool/call` event is one call). `callId` is the **pairing id** between a tool call and its result, and nothing in the contract says two different calls cannot share one — deduping on it would silently merge two real calls into one row and report a quietly low count. So `callId` is only part of the fallback token for an event that carries **no numeric `seq`**;
 - **the call count is derived from the final rows**, never accumulated alongside them — two sources for one fact drift, and that is exactly what a live report's "18 rows / 17 calls" forced into the open;
 - when the two differ, the header explains why, so nobody has to stare at the numbers.
 
 **The order is the session's, not the arrival's.** Events arrive newest-first and older pages are **prepended**, so ordering by arrival gives you the reverse (a live report had turn 31 above turn 5). Records are sorted ascending by the event's own `seq`, whatever order the pages happen to arrive in.
 
-**Paging is judged by the window, never by the promise.** The real `session.loadOlder()` **silently does nothing** in several conditions (a session still opening, `events` not yet arrived, a concurrent read) and returns an already-resolved promise, so "resolved" does not mean "a page arrived". The tab compares the **window's length** before and after. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
+**Paging is judged by whether the window reached further back — not by the promise, and not by its length.** The real `session.loadOlder()` **silently does nothing** in several conditions (a session still opening, `events` not yet arrived, a concurrent read) and returns an already-resolved promise, so "resolved" does not mean "a page arrived". The judgement is:
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.9.0 · 第 43 页 · 已读完 · 可翻页 是`.
+```
+the OLDEST seq in the window decreased   <- primary: only acquiring older history can do this
+or
+the window grew                          <- secondary: a live append can grow it too
+```
+
+**Length alone is wrong**: the window is bounded, so it can **slide** — constant length while the whole content moves older. Such a page was judged "no progress", and after two of those the tab gave up with "无进展停止", reporting *giving up* as *nothing there*. `test/usage-tab.mjs` pins this with a true sliding window (constant capacity 40, advancing 20 per page) that hides a skill in the older history.
+
+**Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
+
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.9.1 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -429,8 +440,8 @@ Twenty-one dependency-free scripts. They run against a real staged library when 
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
-| `usage-ledger.mjs` | the ledger's pure logic (58 assertions), with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one `callId` counts once across pages, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, **ordering follows `seq` (the session's order, not the arrival's)**, **the row/call relationship holds structurally** (`calls ≤ rows`, equality exactly when no call named several skills), and malformed input returns an empty ledger instead of throwing |
-| `usage-tab.mjs` | the tab's wiring (82 assertions), taking the component through the **same load path the browser uses** and rendering it: the registration contract, both `inject` arguments, three "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, **the oldest record staying listed after the window evicts it**, **a parent re-render never stalling the paging**, **"reading" expiring on a deadline**, **a row/call difference explaining itself**, and no developer diagnostics left in the UI |
+| `usage-ledger.mjs` | the ledger's pure logic (59 assertions), with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one event counts once across pages, **two different events sharing one `callId` still count as two**, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, **ordering follows `seq` (the session's order, not the arrival's)**, **the row/call relationship holds structurally** (`calls ≤ rows`, equality exactly when no call named several skills), and malformed input returns an empty ledger instead of throwing |
+| `usage-tab.mjs` | the tab's wiring (87 assertions), taking the component through the **same load path the browser uses** and rendering it: the registration contract, both `inject` arguments, three "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, **the oldest record staying listed after the window evicts it**, **a parent re-render never stalling the paging**, **"reading" expiring on a deadline**, **a row/call difference explaining itself**, and no developer diagnostics left in the UI |
 | `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declarations, and proves `apply()` survives four document timings; it also **scans for and rejects** the falsified data contracts returning (`legacy.nodes`, `useChat`, counting tool declarations as usage, **paging against `source.loadOlder` instead of `session.loadOlder`**) |
 | `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
