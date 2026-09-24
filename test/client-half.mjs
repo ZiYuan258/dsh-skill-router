@@ -5,9 +5,13 @@
 // 也没有 Cordis ctx,所以用 node:vm 给它一套桩环境,然后:
 //   1. 确认它作为经典脚本可编译、并把自己注册进 __ModuleLoader__ 队列;
 //   2. 按 create() 的方式 materialize factory(require 提供 React 桩),校验插件形状;
-//   3. **真的渲染一次**,用夹具数据断言输出里的中文名与英文原名。
+//   3. 确认那些**已被实测证伪的数据契约**没有偷偷回来。
 //
-// 第 3 步是关键:只做静态检查的话,一个把字段名写错的组件照样通过。
+// 关于第 3 步:这个文件过去用夹具「真的渲染一次」,并因此断言过 useChat/legacy.nodes 的形状。
+// 那些断言当时全绿,而标签页在真实会话里是空的——因为夹具编码的是一个**推断**出来的形状,
+// 而不是实测到的形状,而 legacy.nodes 本身就已证明不是会话历史(实测 210 个节点、0 次工具
+// 调用,同期账本里有 2778+ 条事件)。渲染行为现在由 test/usage-tab.mjs 用实测形状覆盖,这里
+// 不再重复一遍假装的渲染,改为把作废契约钉死:它们回来就是回归。
 import { readFileSync } from 'node:fs'
 import { createContext, Script } from 'node:vm'
 import { fileURLToPath } from 'node:url'
@@ -34,6 +38,19 @@ const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*
 check('no @deepseek-ai/* reference in code', code.includes('@deepseek-ai/') === false)
 check('no node: builtin reference in code', /node:[a-z/]+/.test(code) === false)
 check('no process / Buffer use in code', /\b(process\.|Buffer\.)\b/.test(code) === false)
+
+// --- 1b. the falsified contracts must not come back ----------------------------------
+//
+// Every one of these was measured wrong against a live session, and each wrong version looked
+// entirely reasonable in review. Reintroducing one is a regression even if every render test
+// still passes, because the failure mode is a plausible-looking list rather than a crash.
+check('does not read useChat / legacy.nodes (a truncated UI projection, not the history)', /\.legacy\b|\buseChat\b/.test(code) === false, code.match(/[^\n]*(\.legacy\b|useChat)[^\n]*/)?.[0]?.trim().slice(0, 100))
+check('does not collect per-turn tool declarations as usage', /toolDecl|declarations|requestHeaders/.test(code) === false)
+check('reads the session ledger via sessions.binding', code.includes('sessions') && code.includes('binding('))
+check('reads snapshot entries from eventSource', code.includes('eventSource') && code.includes('getSnapshot'))
+check('keys records on callId', code.includes('callId'))
+check('pages with loadOlder', code.includes('loadOlder'))
+check('subscribes to the ledger', code.includes('subscribe'))
 
 // --- 2. compile as a classic script, then materialize the registration ---------------
 const styleTags = []
@@ -188,6 +205,11 @@ check('the factory returns a plugin with apply()', plugin !== null && typeof plu
 // early, and nothing is registered — the tab simply never appears, with no error anywhere.
 // This assertion is the point: the harness below hands `slots` to ctx unconditionally, so a
 // plugin that forgot to declare it would otherwise pass every other check in this file.
+//
+// `sessions` is deliberately NOT declared: the ledger does not come from a service lookup but
+// from the registration's own `inject`, which the session-scoped slot calls with the scope's
+// session id. That declaration is asserted below instead, because a registration without it
+// renders an empty tab forever.
 const declaresSlots = plugin !== null && typeof plugin === 'object' && Array.isArray(plugin.inject) && plugin.inject.includes('slots')
 check('the plugin declares inject: ["slots"]', declaresSlots, JSON.stringify(plugin === null || typeof plugin !== 'object' ? null : plugin.inject))
 
@@ -204,46 +226,13 @@ if (plugin !== null && typeof plugin === 'object' && typeof plugin.apply === 'fu
   check('its slot id is namespaced', reg !== undefined && reg.options.id === 'skill-router-usage', reg === undefined ? '' : String(reg.options.id))
   check('its tab label is Chinese', reg !== undefined && reg.options.label === '技能', reg === undefined ? '' : String(reg.options.label))
   check('it registers a component', reg !== undefined && typeof reg.Component === 'function')
-
-  // --- 3. render it against fixture nodes ------------------------------------------
-  const flat = (node) => {
-    if (node === null || node === undefined || node === false || node === true) return ''
-    if (typeof node === 'string' || typeof node === 'number') return String(node)
-    if (Array.isArray(node)) return node.map(flat).join('')
-    if (typeof node === 'object' && Array.isArray(node.children)) return flat(node.children)
-    return ''
-  }
-
-  const nodes = [
-    { kind: 'assistant', seq: 1, blocks: [{ kind: 'reasoning', text: 'thinking' }, { kind: 'tool-call', name: 'skill_load', arguments: { name: 'verification-before-completion' } }] },
-    { kind: 'tool-result', seq: 2, call: { name: 'skill_load', argsRaw: '{"name":"verification-before-completion"}' }, content: [] },
-    { kind: 'assistant', seq: 3, blocks: [{ kind: 'tool-call', name: 'skill', arguments: { name: 'writing-plans' } }, { kind: 'tool-call', name: 'skill_search', arguments: { query: 'x' } }] },
-    { kind: 'user', seq: 4 },
-  ]
-  const useChat = (selector) => selector({ legacy: { nodes } })
-  const tree = reg.Component({ useChat, sessionId: 's1', useProjection: () => null })
-  const text = flat(tree)
-
-  check('the view renders the loaded skills', text.includes('verification-before-completion') && text.includes('writing-plans'), text.slice(0, 160))
-  check('it shows the Chinese name for each skill', text.includes('验证·前置·完成') && text.includes('写作·规划'), text.slice(0, 200))
-  check('it counts two loads and two distinct skills', text.includes('共 2 次') && text.includes('2 个技能'), text.slice(0, 200))
-  check('skill_search is not counted', text.includes('skill_search') === false)
-  check('the tool-result node is not double counted', (text.match(/verification-before-completion/g) || []).length === 1, 'occurrences=' + (text.match(/verification-before-completion/g) || []).length)
-  check('it states that only display is translated', text.includes('仅用于显示'), text.slice(0, 200))
-
-  // A session with no skill loads must say so rather than render an empty list.
-  const emptyTree = flat(reg.Component({ useChat: () => ({ legacy: { nodes: [{ kind: 'user', seq: 1 }] } }) }))
-  check('an empty session says so in Chinese', emptyTree.includes('尚未加载任何技能'), emptyTree.slice(0, 120))
-
-  // A missing seat must degrade, not throw.
-  let threw
-  try {
-    const noSeat = flat(reg.Component({}))
-    check('a missing useChat seat degrades with an explanation', noSeat.includes('useChat'), noSeat.slice(0, 120))
-  } catch (error) {
-    threw = error
-  }
-  check('a missing useChat seat does not throw', threw === undefined, threw === undefined ? undefined : String(threw))
+  // The ledger reaches the component only through this: `conversation.view` is a session-scoped
+  // slot, and its registration is where the scope's session id is turned into that session's
+  // eventSource. Without `inject` the tab renders, says "no ledger", and never recovers.
+  check('the registration declares inject (that is where the session ledger arrives)', reg !== undefined && typeof reg.options.inject === 'function', reg === undefined ? '' : typeof reg.options.inject)
+  // The tab is a singleton while sessions are not: the outer component must be the keyed
+  // wrapper, or a session switch keeps rendering the previous session's ledger.
+  check('it registers the keyed wrapper, not the bare view', reg !== undefined && reg.Component.name === 'KeyedUsageView', reg === undefined ? '' : String(reg.Component.name))
 }
 
 console.log(problems.length === 0 ? 'client half: OK' : 'client half FAILED:\n  ' + problems.join('\n  '))

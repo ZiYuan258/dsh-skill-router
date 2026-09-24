@@ -200,85 +200,14 @@ function joinPath(dir, child) {
   return dir.endsWith('/') || dir.endsWith('\\') ? dir + child : dir + '/' + child
 }
 
-/** How many names one call may contribute. Mirrors the tool's own batch limit. */
-const USAGE_MAX_NAMES = 8
-
-/**
- * Read a skill call's arguments out of a tool-call block.
- *
- * The block's `arguments` holds the tool's own argument object exactly as the model sent
- * it. Two shapes reach here depending on where the block came from:
- *   - an object, from a live assistant block;
- *   - a JSON string, which is what `tool-result.call.argsRaw` carries.
- * Both are accepted; anything else yields no names rather than a guess.
- *
- * Field names verified against a running session (183 nodes) rather than inferred: an
- * assistant node carries `blocks`, each block is discriminated by `kind` (not `type`), and
- * a tool call is `{ kind: 'tool-call', name, arguments }`. Three earlier guesses about this
- * layout — a `kind: 'tool-call'` node, `node.block.call`, `conv.blocks` — were each wrong,
- * which is why the shape is now recorded here instead of assumed.
- */
-function usageArgsOf(block) {
-  const raw = isRecord(block) ? block.arguments : undefined
-  if (isRecord(raw)) return raw
-  if (typeof raw === 'string' && raw.trim().startsWith('{')) {
-    try {
-      const parsed = JSON.parse(raw)
-      if (isRecord(parsed)) return parsed
-    } catch {
-      /* not JSON: no names to read */
-    }
-  }
-  return undefined
-}
-
-/**
- * Collect the skill loads recorded in a conversation's chat nodes.
- *
- * This is the whole data path for the usage tab, and it deliberately needs no Host
- * cooperation: `conversation.view` receives `useChat`, whose `legacy.nodes` is the ordered
- * list of what the turn already knows. Reading it here means no RPC, no projection key and
- * no Host half — the tab works in a browser tab that never talks to the plugin's Host at
- * all.
- *
- * It lives in this file so Node can unit-test it against fixtures; the Client half carries
- * the same function, because a Client bundle cannot import from here.
- *
- * Only leaf scalars are read: `kind`, `name` and the argument fields. Nothing is copied
- * whole, and no node or block is serialized.
- *
- * @param nodes - the chat node array, or anything else (returns an empty list).
- * @returns `{ callId, name, tool }` per loaded skill, in conversation order.
- */
-export function collectSkillUsage(nodes) {
-  const out = []
-  if (Array.isArray(nodes) === false) return out
-  for (const node of nodes) {
-    if (isRecord(node) === false) continue
-    if (String(node.kind) !== 'assistant') continue
-    const blocks = Array.isArray(node.blocks) ? node.blocks : []
-    for (const block of blocks) {
-      if (isRecord(block) === false) continue
-      if (String(block.kind) !== 'tool-call') continue
-      const tool = String(block.name ?? '')
-      // `skill` is the resident catalog tool; the other two are this plugin's.
-      // skill_search is absent on purpose: searching is not loading.
-      if (tool !== 'skill' && tool !== 'skill_load' && tool !== 'skill_ref') continue
-      const args = usageArgsOf(block)
-      if (args === undefined) continue
-      const names = tool === 'skill_load' ? splitRequestedNames(args.name).concat(splitRequestedNames(args.names)) : splitRequestedNames(args.name)
-      const seen = []
-      for (const raw of names) {
-        const name = normName(raw)
-        if (name === '' || seen.includes(name)) continue
-        seen.push(name)
-        out.push({ name, tool })
-        if (seen.length >= USAGE_MAX_NAMES) break
-      }
-    }
-  }
-  return out
-}
+// A note for whoever comes looking for `collectSkillUsage` in this file: it was here, and it
+// was DELETED — along with `usageArgsOf` and `USAGE_MAX_NAMES` — because its data contract was
+// false. It read the conversation out of `useChat`'s `legacy.nodes` and treated those nodes as
+// the session history. They are not: a live snapshot held 210 nodes with ZERO tool calls while
+// the session ledger held 2,778+ events including them. Anything that wants skill usage must
+// read `ctx.sessions.binding(sessionId).eventSource`; that is what the Client tab does now, and
+// `test/usage-ledger.mjs` pins the shape it reads. A second, host-side copy of the same logic is
+// how the two drifted apart to begin with, so it is not coming back.
 
 /**
  * Collapse a path to forward slashes with `.` and `..` resolved, without importing

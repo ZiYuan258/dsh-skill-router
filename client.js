@@ -3,22 +3,55 @@
 // Adds a 技能 tab to the conversation view ring, beside Chat / Trajectory / Approval /
 // Context, listing which skills this session actually loaded.
 //
-// Everything here is Client-side on purpose. The seat delivers `useChat`, whose
-// `legacy.nodes` is the ordered conversation the turn already holds, so this half reads
-// skill calls straight out of it: no Host RPC, no projection key, no typert dependency and
-// no Host half at all. That is also why the tab works with the model context untouched —
-// nothing here is ever sent to the model.
+// Everything here is Client-side on purpose: no Host RPC, no projection key, no typert
+// dependency, no Host half at all. Nothing here is ever sent to the model.
 //
-// Shape of the data, verified against a running session rather than inferred:
-//   assistant node   { kind: 'assistant', blocks: [ { kind: 'tool-call', name, arguments } ] }
-//   tool-result node { kind: 'tool-result', call: { name, argsRaw: '<json string>' } }
-// A tool call is a BLOCK discriminated by `kind`, not a node kind of its own, and the
-// tool-result node repeats the same call — counting both would double every load.
+// ── where the data comes from, and the three contracts that were wrong before ─────────
 //
-// Field names in this file must stay in step with `collectSkillUsage` in host.js, which
-// carries the same function so Node can unit-test it. A Client bundle cannot import from
-// the Host half, so the duplication is deliberate; `test/usage.mjs` pins the Host copy and
-// `test/client-half.mjs` pins this one's shape.
+// The one authoritative source is the session ledger:
+//
+//   const binding = ctx.sessions.binding(props.sessionId)
+//   binding.eventSource   →  ObservableSnapshot<SessionEventWindow>
+//                            { entries, hasMore, revision, subscribe }
+//
+// It is the same stream the agent runs on, so a skill call is visible here at the moment it
+// happens, with no projection of its own. Three earlier versions of this tab read something
+// else, and each failure is worth keeping written down because all three looked reasonable:
+//
+//   1. `useChat((s) => s.legacy.nodes)` — a plausible seat, wrong data contract. Verified by
+//      snapshotting it live mid-session: 210 nodes holding ZERO tool calls while the ledger
+//      held 2,778+ events including the skill calls. `legacy.nodes` is a truncated UI
+//      projection, not the conversation history.
+//   2. Per-turn tool DECLARATIONS read out of request headers — counted skills that were
+//      merely *offered* to the model as though they had been loaded. Every count it produced
+//      was inflated; a session reported as "skill_load × 23" had loaded nothing of the sort.
+//   3. A host-side recorder fed by an assumed Host→Client push. Measured instead of assumed:
+//      the Host half's `ctx.get('remote')` is `undefined`, so that push does not exist. The
+//      ledger needs no recorder — it already carries both history and the live tail.
+//
+// Event shape, observed rather than inferred:
+//
+//   { type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }
+//
+// A real skill call was found at seq=6228 as `skill_search`, and `entries`/`revision` were
+// watched growing while a session ran. Two properties of that window decide the design of
+// the ledger below:
+//
+//   • `hasMore` is TRUE on the newest page. Page 0 is therefore the *recent* end of the
+//     history, so a skill loaded five pages back is invisible until `loadOlder()` gets there,
+//     and any count is partial until `hasMore` becomes false.
+//   • The window is bounded — observed capped between ~1,664 and ~1,900 entries, and seen
+//     resetting from 3,336 down to 1,664. Entries can therefore fall OUT of the window after
+//     having been read. So the ledger accumulates what it has read instead of re-deriving the
+//     list from the window on every render, and it merges by `callId`.
+//
+// `callId` is the identity of a call, not `seq` and not the array position: the same call is
+// re-delivered on every later snapshot, so anything else would count one load many times.
+// One call may name several skills (`name` or `names`), and the display row is
+// `callId + normalized skill name`, so `A+B` yields two rows but one call.
+//
+// `test/usage-ledger.mjs` pins all of this against the real shapes, and loads this file the
+// way the browser does (see below) rather than importing it.
 
 /**
  * How this file is loaded — and the two ways that went wrong.
@@ -64,10 +97,10 @@ window.__ModuleLoader__.load({
       // The Client runner activates the services a plugin declares, per plugin — it is not
       // global. Without this line `ctx.get('slots')` below returns undefined, apply returns
       // early, and the tab is never registered, with nothing but a console line to show for
-      // it. dsh-context declares ["slots", "locale"] for the same reason; this half needs
-      // only `slots`, because its Chinese names are a static glossary rather than a locale
-      // dictionary.
-      inject: ['slots'],
+      // it. dsh-context declares ["slots", "locale"] for the same reason. `sessions` is
+      // declared because the ledger lives there and a missing one is a hard dependency: with
+      // it absent the tab has nothing to read and must not pretend otherwise.
+      inject: ['slots', 'sessions'],
       apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
@@ -229,8 +262,13 @@ window.__ModuleLoader__.load({
       return changed ? out.join('·') : ''
     }
 
-    // ── reading the conversation ────────────────────────────────────────────────
+    // ── the ledger ──────────────────────────────────────────────────────────────
+    // Tools that actually LOAD a skill. `skill_search` is deliberately absent: searching is
+    // how a skill is found, not how it is used, and counting it made every count wrong — see
+    // contract (2) at the top of this file. These three are also exactly the tools this
+    // plugin registers, so the tab and the router agree on what "a load" means.
     const LOAD_TOOLS = { skill: true, skill_load: true, skill_ref: true }
+    // The router accepts at most 8 names per call; a 9th can never have been honoured.
     const MAX_NAMES = 8
 
     /**
@@ -248,14 +286,29 @@ window.__ModuleLoader__.load({
       return end === text.length ? text : text.slice(0, end)
     }
 
-    function normName(value) {
-      let text = stripTrailingSlashes(String(value === null || value === undefined ? '' : value).trim().replace(/\\/g, '/'))
-      // Anchored single-character and fixed alternatives: neither can backtrack.
+    /**
+     * The match key, from whatever the model passed.
+     *
+     * `skill_load` accepts a bare name, a `repo/name` pair, a full path to a SKILL.md file or
+     * an `@scope/name` — and the tab must show the same skill for all of them, or the count of
+     * unique skills breaks. The last path segment is that common denominator, which is also
+     * what `normName` does in host.js.
+     */
+    function normalizeSkillName(value) {
+      let text = String(value === null || value === undefined ? '' : value).trim().replace(/\\/g, '/')
+      text = stripTrailingSlashes(text)
       text = text.replace(/^@/, '').replace(/\/SKILL\.md$/i, '')
       const parts = text.split('/')
       return String(parts[parts.length - 1] || '').trim()
     }
 
+    /**
+     * Every name a call can carry, as a plain array.
+     *
+     * `skill_load` takes `name` OR `names`, and `names` arrives either as a real array or as
+     * one JSON string — both were seen in the wild. Without this the single `A+B` call form
+     * would collapse into one nonsense name like `["a","b"]` and lose a skill from the count.
+     */
     function splitNames(value) {
       const out = []
       const push = (entry) => {
@@ -281,7 +334,7 @@ window.__ModuleLoader__.load({
             /* not JSON: treat it as one literal name */
           }
         }
-        if (/[,;\n]/.test(text)) {
+        if (text.indexOf(',') >= 0 || text.indexOf(';') >= 0 || text.indexOf('\n') >= 0) {
           const parts = text.split(/[,;\n]+/)
           for (let i = 0; i < parts.length; i += 1) push(parts[i])
           return
@@ -292,8 +345,8 @@ window.__ModuleLoader__.load({
       return out
     }
 
-    function argsOf(block) {
-      const raw = block === null || typeof block !== 'object' ? undefined : block.arguments
+    /** `arguments` may be an object or the raw JSON string the model produced. */
+    function argsOf(raw) {
       if (raw !== null && typeof raw === 'object' && Array.isArray(raw) === false) return raw
       if (typeof raw === 'string' && raw.trim().charAt(0) === '{') {
         try {
@@ -306,35 +359,275 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
-    /** Same contract as collectSkillUsage in host.js — see the note at the top of the file. */
-    function collectSkillUsage(nodes) {
-      const out = []
-      if (Array.isArray(nodes) === false) return out
-      for (let n = 0; n < nodes.length; n += 1) {
-        const node = nodes[n]
-        if (node === null || typeof node !== 'object' || Array.isArray(node)) continue
-        if (String(node.kind) !== 'assistant') continue
-        const blocks = Array.isArray(node.blocks) ? node.blocks : []
-        for (let b = 0; b < blocks.length; b += 1) {
-          const block = blocks[b]
-          if (block === null || typeof block !== 'object') continue
-          if (String(block.kind) !== 'tool-call') continue
-          const tool = String(block.name === null || block.name === undefined ? '' : block.name)
-          if (LOAD_TOOLS[tool] !== true) continue
-          const args = argsOf(block)
-          if (args === undefined) continue
-          const names = tool === 'skill_load' ? splitNames(args.name).concat(splitNames(args.names)) : splitNames(args.name)
-          const seen = []
-          for (let i = 0; i < names.length; i += 1) {
-            const name = normName(names[i])
-            if (name === '' || seen.indexOf(name) >= 0) continue
-            seen.push(name)
-            out.push({ name, tool })
-            if (seen.length >= MAX_NAMES) break
-          }
+    // Test seam. The ledger is the part of this half that can be wrong while still looking
+    // fine — a miscount renders a plausible list — so `test/usage-ledger.mjs` pins it: the test
+    // calls this `apply` with a stub ctx and then reads these. Placed here because every value
+    // above is initialized by now and nothing can have returned yet; every side effect of
+    // `apply` lives inside `ctx.effect`, so an offline call registers nothing at all. The React
+    // loader ignores unknown exports.
+    module.exports.__internals = { buildLedger, normalizeSkillName, splitNames, argsOf, LOAD_TOOLS, MAX_NAMES }
+
+    /**
+     * Fold one window of events into the running ledger.
+     *
+     * Pure and total: it never throws and never mutates its inputs, because it runs on every
+     * snapshot including ones taken while streaming, and a throw here would take the tab down
+     * with it.
+     *
+     * `previous` is what makes the bounded window safe. A later snapshot re-contains the events
+     * already read, and may also have LOST entries off the old end; merging by
+     * `callId + normalized name` means a re-delivered call contributes nothing new while an
+     * evicted one stays counted.
+     */
+    function buildLedger(source, options) {
+      const opts = options === null || typeof options !== 'object' ? {} : options
+      const files = []
+      // Rows are keyed by `callId::skill`; calls by `callId` alone. Two maps, because they
+      // answer different questions and dedupe differently: a call that names A and B is one
+      // call and two rows, and re-reading a page must add neither.
+      const seen = {}
+      const counted = {}
+      let calls = 0
+
+      const take = (record) => {
+        if (seen[record.id] === true) return false
+        seen[record.id] = true
+        files.push(record)
+        if (counted[record.callId] !== true) {
+          counted[record.callId] = true
+          calls += 1
+        }
+        return true
+      }
+      // The prior files are replayed rather than added: `take` rebuilds both keys from the
+      // records themselves, so a call carried over from an earlier page cannot be counted a
+      // second time when the window re-delivers it. (Carrying the old call COUNT forward and
+      // adding to it cannot work — a later page legitimately overlaps calls already counted,
+      // and only the keys can tell which.)
+      if (opts.previous !== null && typeof opts.previous === 'object' && Array.isArray(opts.previous.files)) {
+        for (let i = 0; i < opts.previous.files.length; i += 1) take(opts.previous.files[i])
+      }
+
+      const entries = Array.isArray(source) ? source : []
+      for (let i = 0; i < entries.length; i += 1) {
+        const wrapper = entries[i]
+        if (wrapper === null || typeof wrapper !== 'object') continue
+        const event = wrapper.event !== null && typeof wrapper.event === 'object' ? wrapper.event : wrapper
+        if (String(event.type) !== 'tool/call') continue
+        const data = event.data !== null && typeof event.data === 'object' ? event.data : undefined
+        if (data === undefined) continue
+        const callId = String(data.callId === null || data.callId === undefined ? '' : data.callId)
+        if (callId === '') continue
+        const tool = String(data.name === null || data.name === undefined ? '' : data.name)
+        if (LOAD_TOOLS[tool] !== true) continue
+        const args = argsOf(data.arguments)
+        if (args === undefined) continue
+        const raw = tool === 'skill_load' ? splitNames(args.name).concat(splitNames(args.names)) : splitNames(args.name)
+        let kept = 0
+        for (let n = 0; n < raw.length && kept < MAX_NAMES; n += 1) {
+          const skill = normalizeSkillName(raw[n])
+          if (skill === '') continue
+          kept += 1
+          // `take` counts the call on the first row it accepts, so a call naming nothing
+          // usable stays uncounted and a re-delivered call stays counted once.
+          take({ id: callId + '::' + skill, callId, skill, tool, turn: data.turn, step: data.step })
         }
       }
-      return out
+
+      // `hasMore` is true on the newest page, so "complete" cannot be assumed from a full
+      // window — it is only ever reached by paging to the start.
+      let completeness = 'complete'
+      if (opts.error !== undefined && opts.error !== null) completeness = 'error'
+      else if (opts.loading === true) completeness = 'loading'
+      else if (opts.hasMore === true) completeness = 'partial'
+
+      // Distinct NORMALIZED names, which is the question "涉及多少个技能" asks. It dedupes
+      // separately from `calls` on purpose: one call naming A and B is 1 call and 2 skills,
+      // and two calls both naming A are 2 calls and 1 skill.
+      const unique = {}
+      let uniqueSkills = 0
+      for (let i = 0; i < files.length; i += 1) {
+        if (unique[files[i].skill] !== true) {
+          unique[files[i].skill] = true
+          uniqueSkills += 1
+        }
+      }
+
+      return {
+        files,
+        calls,
+        uniqueSkills,
+        completeness,
+        hasMore: opts.hasMore === true,
+        page: typeof opts.page === 'number' ? opts.page : 0,
+        error: opts.error === undefined ? null : opts.error,
+      }
+    }
+
+    // ── reading the ledger ──────────────────────────────────────────────────────
+    /**
+     * Paging policy. `hasMore` is true on the newest page, so:
+     *
+     *   • page 0 is read immediately — that is the recent end, and waiting for it would leave
+     *     the tab blank during the very work it is meant to show;
+     *   • every later page is pulled exactly ONCE, in an effect, and a page is only requested
+     *     while `historyComplete` is false.
+     *
+     * That second rule is the whole reason this is an effect and not part of render: a
+     * `loadOlder()` call issued during render would re-enter render as soon as it resolved,
+     * each pass asking for one more page, forever. `test/usage-ledger.mjs` pins the bound with
+     * a fake source that counts `loadOlder` calls.
+     */
+    const LOAD_OLDER_CAP = 200
+    // One `tool/call` per snapshot in the best case, but streaming fragments arrive per chunk
+    // — ~1,447 of 2,778 observed callbacks were `assistant/live-chunk`. Rendering per fragment
+    // would spend the tab's budget on redraws of unchanged data; 400 ms is below the threshold
+    // where a new row reads as missing while never redrawing mid-token.
+    const LIVE_THROTTLE_MS = 400
+
+    /** Narrow one snapshot into the few fields the ledger needs, tolerating an absent one. */
+    function windowOf(source) {
+      if (source === null || typeof source !== 'object') return { entries: [], hasMore: false }
+      const entries = Array.isArray(source.entries) ? source.entries : []
+      return { entries, hasMore: source.hasMore === true }
+    }
+
+    /**
+     * Merge the current window into what has already been read.
+     *
+     * `base` is the seed — the page-0 read captured when the hook first ran — and the window is
+     * merged on top of it, so entries that fell out of the window stay in the ledger.
+     */
+    function ledgerFrom(base, source, state) {
+      const now = windowOf(source)
+      return buildLedger(now.entries, {
+        previous: base,
+        hasMore: now.hasMore,
+        loading: state.loading,
+        error: state.error,
+        page: state.page,
+      })
+    }
+
+    /**
+     * The tab's reader: subscribe to the ledger, page backwards, stay bounded.
+     *
+     * Returns `{ ledger, loading, page, error }`. `ledger` carries `files` (one row per
+     * callId+skill), `calls` (callIds), `uniqueSkills` (distinct names) and `completeness`.
+     */
+    function useUsageLedger(props) {
+      const input = props === null || props === undefined ? {} : props
+      // The source arrives as a PROP, bound per session by the slot registration above. That is
+      // not a stylistic choice, it is the contract: `conversation.view` is declared `scope:
+      // "session"`, the renderer calls a registration's `inject(sessionId)` with `binding.key`
+      // and spreads the result over the component's props, and it hands the component a `binding`
+      // prop as well. Reading a session out of ambient state instead would be reading something
+      // the contract does not promise — and an earlier version of this file did exactly that with
+      // `props.sessionId`, which is only ever populated because the conversation root happens to
+      // pass it down.
+      const source = input.source
+      const usable = source !== null && source !== undefined && typeof source.getSnapshot === 'function'
+      const absent = typeof input.sourceError === 'string' && input.sourceError !== '' ? input.sourceError : '这个会话没有可用的 eventSource。'
+
+      const seedRef = React.useRef(null)
+      if (seedRef.current === null) {
+        const first = usable ? windowOf(source.getSnapshot()) : { entries: [], hasMore: false }
+        seedRef.current = buildLedger(first.entries, { hasMore: first.hasMore })
+      }
+      const pageRef = React.useRef(0)
+      const inFlightRef = React.useRef(false)
+      const [state, setState] = React.useState({ page: 0, loading: usable, error: usable ? null : absent, tick: 0 })
+
+      // One long-lived reader. `push` is stable on purpose: an effect that re-subscribed on
+      // every snapshot would detach and reattach the observable on each new event, and the
+      // subscription this tab needs is exactly the one that must stay put while events arrive.
+      const push = React.useCallback(() => {
+        if (usable === false) return
+        const now = windowOf(source.getSnapshot())
+        seedRef.current = buildLedger(now.entries, { previous: seedRef.current, hasMore: now.hasMore })
+        // `loading` is deliberately NOT touched here. The paging effect depends on it, so a
+        // writer on this side re-triggers that effect and pulls an extra page per event — the
+        // symptom was 399 `loadOlder` calls against a cap of 200, and it only shows up on a
+        // ledger whose history never ends. Only the paging effect and `loadOlder`'s own
+        // resolution may write `loading`; this callback only says "the window moved".
+        setState((prev) => ({ page: prev.page, loading: prev.loading, error: prev.error, tick: prev.tick + 1 }))
+      }, [usable, source])
+
+      React.useEffect(() => {
+        if (usable === false) return undefined
+        let live = true
+        let timer
+        // Throttled rather than debounced: the ledger must still move while a long answer
+        // streams, and the last fragment of a burst has to land rather than being dropped.
+        const onChange = () => {
+          if (timer !== undefined) return
+          timer = setTimeout(() => {
+            timer = undefined
+            if (live) push()
+          }, LIVE_THROTTLE_MS)
+        }
+        if (typeof source.subscribe === 'function') source.subscribe(onChange)
+        push()
+        return () => {
+          live = false
+          if (timer !== undefined) clearTimeout(timer)
+          if (typeof source.unsubscribe === 'function') source.unsubscribe(onChange)
+        }
+      }, [usable, source, push])
+
+      // Pages are pulled one at a time, guarded by refs rather than by `state.loading`.
+      //
+      // The guard has to be synchronous and outside the render state. An earlier version kept
+      // `state.loading` in this effect's dependencies and flipped it inside the effect; because
+      // a ref advances only when a page RESOLVES, an effect re-entered mid-flight (the live
+      // subscriber bumps `state.tick` whenever the window moves) started a second page request
+      // for the same page number. Measured against a ledger that never ends: 399 `loadOlder`
+      // calls against a cap of 200 — and it is invisible on a short history, which finishes
+      // long before the doubling can show.
+      React.useEffect(() => {
+        if (usable === false || typeof source.loadOlder !== 'function') return undefined
+        if (windowOf(source.getSnapshot()).hasMore === false) {
+          // Nothing to page. The initial state cannot know that — it is seeded with `usable` so
+          // the first paint already says "reading" instead of showing an unfinished count — so
+          // it is cleared here. Without this a session whose window is fully loaded would sit on
+          // "正在读取更早的记录…" forever.
+          setState((prev) => (prev.loading === true ? { page: prev.page, loading: false, error: prev.error, tick: prev.tick } : prev))
+          return undefined
+        }
+        if (inFlightRef.current === true || pageRef.current >= LOAD_OLDER_CAP) return undefined
+        inFlightRef.current = true
+        let live = true
+        setState((prev) => (prev.loading === true ? prev : { page: prev.page, loading: true, error: prev.error, tick: prev.tick }))
+        source.loadOlder().then(
+          () => {
+            if (live === false) return
+            inFlightRef.current = false
+            pageRef.current += 1
+            setState((prev) => ({ page: pageRef.current, loading: false, error: null, tick: prev.tick + 1 }))
+          },
+          (error) => {
+            if (live === false) return
+            inFlightRef.current = false
+            setState((prev) => ({ page: prev.page, loading: false, error: String(error === null || error === undefined ? '读取更早的记录失败。' : error), tick: prev.tick + 1 }))
+          },
+        )
+        return () => {
+          live = false
+        }
+        // `state.loading` and `state.page` change as a RESULT of this effect and are read through
+        // the refs above; depending on them would re-enter it. `state.tick` is the only signal
+        // that means "the ledger moved, see whether another page is available now".
+      }, [state.tick, usable, source])
+
+      const ledger = React.useMemo(
+        () => (usable ? ledgerFrom(seedRef.current, source.getSnapshot(), state) : buildLedger([], { hasMore: false, loading: false, error: absent })),
+        [usable, source, state.tick, state.loading, state.page, state.error],
+      )
+      // A page that is merely `partial` is a real answer; one with no ledger at all is not, and
+      // the difference is carried out to the view rather than inferred there. The two absent
+      // cases stay distinct in the copy as well: "the service is missing" and "this session has
+      // no ledger" are different problems, and a single message would misdirect whoever reads it.
+      return { ledger, loading: state.loading, page: state.page, error: state.error, usable, absent: usable ? null : absent }
     }
 
     // ── the tab ─────────────────────────────────────────────────────────────────
@@ -346,7 +639,7 @@ window.__ModuleLoader__.load({
       '.sr-usage-idx{min-width:22px;opacity:.5;font-variant-numeric:tabular-nums}',
       '.sr-usage-zh{min-width:210px}',
       '.sr-usage-en{opacity:.55;font-family:var(--dsh-font-mono,ui-monospace,monospace);font-size:11px}',
-      '.sr-usage-tool{opacity:.5;font-size:11px;margin-left:auto}',
+      '.sr-usage-when{opacity:.5;font-size:11px;margin-left:auto}',
       '.sr-usage-empty{opacity:.75}',
       '.sr-usage-note{margin-top:14px;opacity:.6;font-size:11px}',
     ].join('\n')
@@ -380,54 +673,128 @@ window.__ModuleLoader__.load({
       'skill-router: usage tab styles',
     )
 
-    function UsageView(props) {
-      const useChat = props === null || props === undefined ? undefined : props.useChat
-      // Called unconditionally: hooks may not sit behind a conditional return.
-      const slice = typeof useChat === 'function' ? useChat((s) => (s !== null && typeof s === 'object' ? s.legacy : undefined)) : undefined
-      const nodes = slice !== null && typeof slice === 'object' && Array.isArray(slice.nodes) ? slice.nodes : []
-      const skills = collectSkillUsage(nodes)
+    /** The Chinese display name, then the English original — never one without the other. */
+    function renderTitle(skill) {
+      const zh = renderZh(skill)
+      return zh === '' ? skill : zh + '  (' + skill + ')'
+    }
 
-      if (typeof useChat !== 'function') {
-        return React.createElement('div', { className: 'sr-usage' }, React.createElement('p', { className: 'sr-usage-empty' }, '本会话没有可用的对话数据（useChat 座位缺席）。'))
-      }
+    /**
+     * What the header may claim.
+     *
+     * The window is the RECENT end of the history, so a count taken before paging finishes
+     * undercounts — the whole reason `completeness` is threaded this far. A total is only
+     * printed once `historyComplete` is true, and until then the tab says which page it is on
+     * and whether older records still exist, rather than showing a number that would silently
+     * be wrong.
+     */
+    function summaryOf(ledger) {
+      const head = '本会话已加载 ' + ledger.files.length + ' 个技能名（' + ledger.calls + ' 次调用，涉及 ' + ledger.uniqueSkills + ' 个技能）'
+      if (ledger.completeness === 'error') return head + '。'
+      if (ledger.completeness === 'loading') return head + '，正在读取更早的记录…'
+      if (ledger.completeness === 'partial') return head + '，更早的记录尚未读完。'
+      return '本会话共 ' + ledger.calls + ' 次技能调用，涉及 ' + ledger.uniqueSkills + ' 个技能。'
+    }
 
-      const titles = []
-      for (let i = 0; i < skills.length; i += 1) {
-        const zh = renderZh(skills[i].name)
-        titles.push((i + 1) + '. ' + (zh === '' ? skills[i].name : zh + '  (' + skills[i].name + ')'))
-      }
-      const head = skills.length === 0
-        ? React.createElement('p', { className: 'sr-usage-sum' }, '本会话尚未加载任何技能。')
-        : React.createElement('p', { className: 'sr-usage-sum' }, '共 ' + skills.length + ' 次技能加载，涉及 ' + new Set(skills.map((s) => s.name)).size + ' 个技能。')
-
-      const rows = []
-      for (let i = 0; i < skills.length; i += 1) {
-        const skill = skills[i]
-        const zh = renderZh(skill.name)
-        rows.push(
+    function listOf(ledger) {
+      const out = []
+      for (let i = 0; i < ledger.files.length; i += 1) {
+        const file = ledger.files[i]
+        out.push(
           React.createElement(
             'div',
-            { className: 'sr-usage-row', key: String(i) + '-' + skill.name },
+            { className: 'sr-usage-row', key: file.id },
             React.createElement('span', { className: 'sr-usage-idx' }, String(i + 1)),
-            React.createElement('span', { className: 'sr-usage-zh' }, zh === '' ? '—' : zh),
-            React.createElement('span', { className: 'sr-usage-en' }, skill.name),
-            React.createElement('span', { className: 'sr-usage-tool' }, skill.tool),
+            React.createElement('span', { className: 'sr-usage-zh' }, renderTitle(file.skill)),
+            React.createElement('span', { className: 'sr-usage-en' }, file.tool),
+            React.createElement('span', { className: 'sr-usage-when' }, file.turn === undefined || file.turn === null ? '' : '第 ' + file.turn + ' 轮'),
           ),
         )
       }
+      return out
+    }
+
+    /** The footer's honesty about how much history was actually read. */
+    function coverageOf(ledger) {
+      if (ledger.completeness === 'complete') return '已读到本会话最早一条记录，上面的数字是完整的。'
+      if (ledger.completeness === 'error') return '读取更早记录时出错：' + ledger.error
+      if (ledger.completeness === 'loading') return '已读到第 ' + ledger.page + ' 页更早的记录，仍在继续。'
+      return '已读到第 ' + ledger.page + ' 页更早的记录，更早的部分还没读到。'
+    }
+
+    const NOTE = '中文名仅用于显示。技能名是 skill_load、索引检索与 /skill 命令的匹配键，实际调用的始终是英文原名；检索仍走英文原文，SKILL.md 未被修改。'
+
+    function UsageView(props) {
+      const { ledger, usable, absent } = useUsageLedger(props)
+
+      // No ledger to read: say that, and say ONLY that. The summary and coverage lines below
+      // are statements about data that was read, so printing them here would turn "I could not
+      // read the history" into "I read the whole history and it was empty" — the one failure
+      // mode this tab exists to avoid.
+      if (usable === false) {
+        return React.createElement(
+          'div',
+          { className: 'sr-usage' },
+          React.createElement('h3', null, '技能调用清单'),
+          React.createElement('p', { className: 'sr-usage-sum' }, absent === null ? '这个会话没有可用的技能记录。' : absent),
+          React.createElement('p', { className: 'sr-usage-note' }, '技能调用记录来自会话账本 eventSource；读不到它时这里无法给出清单。'),
+        )
+      }
+
+      const head = ledger.error !== null && ledger.files.length === 0
+        ? React.createElement('p', { className: 'sr-usage-sum' }, ledger.error)
+        : React.createElement(
+            'p',
+            { className: 'sr-usage-sum' },
+            ledger.files.length === 0 && ledger.completeness === 'complete' ? '本会话尚未加载任何技能。' : summaryOf(ledger),
+          )
 
       return React.createElement(
         'div',
         { className: 'sr-usage' },
         React.createElement('h3', null, '技能调用清单'),
         head,
-        rows.length === 0 ? null : React.createElement('div', null, rows),
-        React.createElement(
-          'p',
-          { className: 'sr-usage-note' },
-          '中文名仅用于显示。技能名是 skill_load、索引检索与 /skill 命令的匹配键，实际调用的始终是右侧英文原名；检索仍走英文原文，SKILL.md 未被修改。',
-        ),
+        ledger.files.length === 0 ? null : React.createElement('div', null, listOf(ledger)),
+        React.createElement('p', { className: 'sr-usage-note' }, coverageOf(ledger)),
+        React.createElement('p', { className: 'sr-usage-note' }, NOTE),
       )
+    }
+
+    // Mounted per session. The tab is a singleton while sessions are not: React remounts the
+    // inner view whenever the session changes (the key), so no session's seed, page count or
+    // subscription can leak into another's rendering.
+    function KeyedUsageView(props) {
+      const input = props === null || props === undefined ? {} : props
+      const sessionId = input.sessionId === null || input.sessionId === undefined ? '' : String(input.sessionId)
+      return React.createElement(UsageView, {
+        key: sessionId,
+        source: input.source,
+        sourceError: input.sourceError,
+        sessionId: input.sessionId,
+      })
+    }
+
+    /**
+     * Bind this tab to one session's ledger.
+     *
+     * `inject` is how a `scope: "session"` slot hands a registration its session: the renderer
+     * calls it with the scope binding's key and spreads the returned object over the
+     * component's props. Every shipped tab in this row does the same — `trajectory` reaches its
+     * session through `inject`, `chat` opens with `ctx.sessions.binding(sessionId)`. It is also
+     * what makes the tab follow a session switch: the injected props are cached per session, so
+     * the identity changes when the session does.
+     *
+     * A missing or not-yet-resolvable session returns a message rather than throwing. `binding()`
+     * answers `undefined` for a session that is neither listed nor already scoped, and a throw
+     * here would take down the whole tab row instead of one tab in it.
+     */
+    function bindUsageSource(sessionId) {
+      const sessions = ctx.get('sessions')
+      if (sessions === undefined) return { sourceError: '会话服务缺席（ctx.get("sessions") 为空）。' }
+      const binding = typeof sessions.binding === 'function' ? sessions.binding(sessionId) : undefined
+      const source = binding === null || binding === undefined ? undefined : binding.eventSource
+      if (source === null || source === undefined) return { sourceError: '这个会话的账本还不可用（sessions.binding 没有返回 eventSource）。' }
+      return { source }
     }
 
     ctx.effect(
@@ -441,14 +808,16 @@ window.__ModuleLoader__.load({
               // uses 20 for its Context tab, so 21 keeps the two neighbours stable.
               order: 21,
               label: '技能',
+              inject: bindUsageSource,
             },
-            UsageView,
+            KeyedUsageView,
           ),
         ),
       'skill-router: usage tab',
     )
   },
 }
+
     return module.exports
   },
 })

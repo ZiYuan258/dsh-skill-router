@@ -332,24 +332,28 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 
 ```
 技能调用清单
-共 5 次技能加载，涉及 3 个技能。
+共 5 次技能调用，涉及 3 个技能。
 
-1  验证·前置·完成     verification-before-completion   skill_load
-2  写作·规划           writing-plans                    skill
-3  供应链·风险审计     supply-chain-risk-auditor        skill_load
+1  验证·前置·完成     skill_load   第 12 轮
+2  写作·规划           skill        第 12 轮
+3  供应链·风险审计     skill_load   第 31 轮
 ```
 
-**Zero model tokens.** The tab's data comes entirely from the conversation itself: this seat hands the component `useChat`, whose `legacy.nodes` is the conversation the turn already holds, and skill calls are read straight out of it. There is **no Host RPC, no projection key and no network request**, and nothing enters the model's context — the plugin still never touches the network and never writes a file.
+**Zero model tokens.** The data comes entirely from the **session ledger**: the tab's registration declares `inject: (sessionId) => ({ source })`, and because `conversation.view` is a session-scoped slot the renderer spreads that session's `eventSource` over the component's props — which is how the shipped `trajectory`, `chat` and `goal` tabs reach their session too. There is **no Host RPC, no projection key and no network request**, and nothing enters the model's context — the plugin still never touches the network and never writes a file.
+
+> **Why not `useChat().legacy.nodes`.** That was the previous version, and it was **wrong**: measured at one instant, `legacy.nodes` held 210 nodes with **zero tool calls**, while the ledger held 2,778+ events with the skill calls in it. `legacy.nodes` is a truncated UI projection, not the session history. Two versions before that were wrong differently (a guessed node shape; per-turn tool **declarations** read from request headers and counted as usage). None of the three crashed — all three rendered a plausible list — which is exactly why the data contract had to be measured rather than inferred.
+
+**Three-state completeness, no invented numbers.** The ledger window is **bounded** (observed ~1,664–1,900, seen resetting 3,336 → 1,664), and `hasMore` is **true on the newest page**: page 0 is the recent end, so a skill loaded five pages back is invisible until paging reaches it. `共 N 次调用，涉及 M 个技能` is therefore printed only once the older records are exhausted (`hasMore === false`); until then the tab says how many names it has read and that older records remain; and with no ledger to read it says **only that**, printing no count at all. When one call names several skills, rows dedupe on `callId + normalized name` while calls dedupe on `callId` alone — the same `callId` is re-delivered on every later snapshot, and any other key counts one load many times.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
-- what actually gets called is always the English name on the right; the Chinese form never leaves the render layer;
+- what actually gets called is always the English name; the Chinese form never leaves the render layer;
 - search still runs against the English text, and neither `SKILL.md` nor the index is **changed by a single byte**;
 - proper nouns (`azure`, `vercel`, `semgrep`, `figma`…) are left alone — the most frequent tokens in this library's names are `azure` (148) and `google` (44), and translating those only makes a name harder to recognise.
 
 The translation is a **glossary plus a proper-noun allow list**, not 872 hand-written pairs: phrases first (`best-practices` → 最佳实践), then single words (`troubleshooting` → 故障排查), with filler words (`and`, `from`, `the`) dropped.
 
-> **How the node shape was established.** The field paths come from probing a live session (183 nodes), not from inference: an assistant node carries `blocks`, a block is discriminated by **`kind`** (not `type`), and a skill call is `{ kind: 'tool-call', name, arguments }`. Three earlier guesses were all wrong — a `kind: 'tool-call'` node, `node.block.call`, and `conv.blocks`. `test/usage.mjs` copies the probe's output into its fixtures, and `test/client-half.mjs` **actually renders** the component inside `node:vm`.
+> **The event shape is measured, not inferred.** `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }` — a real skill call was found at `seq=6228`, `entries`/`revision` were watched growing during a session, and 1,447 of 2,778 observed subscription callbacks were `assistant/live-chunk` streaming fragments (hence a 400 ms **throttle** rather than a render per fragment). `test/usage-ledger.mjs` copies that shape into its fixtures, and `test/usage-tab.mjs` takes the component through the **same load path the browser uses** and actually renders it.
 
 ## Engineering constraints
 
@@ -369,7 +373,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Nineteen dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Twenty dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -386,8 +390,9 @@ Nineteen dependency-free scripts. They run against a real staged library when on
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
-| `usage.mjs` | the usage tab's data extraction: all three loading tools count, `skill_search` does not, `tool-result` nodes are not counted twice, JSON-string arguments parse, malformed input returns an empty list instead of throwing |
-| `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declaration, and proves `apply()` survives four document timings; then **actually renders** the tab (Chinese name, English original, counts, degrading when the `useChat` seat is missing) |
+| `usage-ledger.mjs` | the ledger's pure logic, with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one `callId` counts once across pages, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, and malformed input returns an empty ledger instead of throwing |
+| `usage-tab.mjs` | the tab's wiring, taking the component through the **same load path the browser uses** and rendering it: the registration contract, the `inject` declarations, both "cannot read the ledger" explanations, a first paint that reads immediately with one page per request, a cap that holds when `hasMore` never clears, a call buried on page 5 being found, 200 streaming fragments scheduling one render, and **the oldest record staying listed after the window evicts it** |
+| `client-half.mjs` | verifies the Client half against the **real loading mechanism**: instruments `window.__ModuleLoader__`, materializes the factory the way `create()` does, asserts the `inject` declarations, and proves `apply()` survives four document timings; it also **scans for and rejects** the falsified data contracts (`legacy.nodes`, `useChat`, counting tool declarations as usage) returning to the code |
 | `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
@@ -404,7 +409,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         nineteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         twenty runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

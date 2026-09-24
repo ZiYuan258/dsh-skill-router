@@ -6,12 +6,27 @@
 //   3. docs/release-notes-v*.md（单文件内双语，中文在前）
 //
 // 只比较读者用来导航的结构与必须逐字一致的事实，不比较行文——两种语言本来就该读起来不同。
+//
+// 还有一项：文件编码。这一条是被咬出来的，不是想出来的——一次「用 PowerShell 就地改一行」
+// 的操作把 README.en.md 写成了 **UTF-8 BOM + CRLF**，于是它的第一行变成 `\uFEFF# dsh-skill-router`，
+// 标题匹配不到，双语标题数变成 36 vs 35。诡异之处在于：**文本内容是对的**，只是前缀变了，
+// 所以 diff 看起来正常、读者也看不出问题，只有这条断言会说话。BOM 在本仓库已经造成过第二次
+// 事故（索引表头的 BOM 曾造出一个名为 `name` 的幽灵技能），所以它值得一条自己的守卫。
 import { readdirSync, readFileSync } from 'node:fs'
 
 const root = new URL('../', import.meta.url)
 const read = (file) => readFileSync(new URL(file, root), 'utf8')
 const problems = []
 const hasCjk = (text) => /[\u3400-\u4dbf\u4e00-\u9fff]/.test(text)
+
+/** 编码守卫：不许有 BOM，不许有 CRLF。两者都能让"内容正确"的文件以诡异方式失败。 */
+function checkEncoding(file) {
+  const buffer = readFileSync(new URL(file, root))
+  const bom = buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+  const crlf = buffer.includes(Buffer.from('\r\n'))
+  if (bom) problems.push(`${file}: has a UTF-8 BOM (it shifts every line-1 match, and produced a phantom skill once already)`)
+  if (crlf) problems.push(`${file}: uses CRLF line endings`)
+}
 
 const headings = (text) => [...text.matchAll(/^(#{1,3}) (.+)$/gm)].map((m) => m[1].length)
 const fences = (text) => (text.match(/^```/gm) ?? []).length
@@ -117,6 +132,11 @@ for (const name of notes) {
     if (lines.slice(0, englishAt).join('\n').trim().length < 200) problems.push(`${name}: the Chinese section looks empty`)
   }
 }
+
+// 编码：每一份文档、以及两个半与清单，都不许带 BOM、不许用 CRLF。放在最后统一跑，
+// 这样新加的文档自动纳入守卫，不依赖谁记得把它列进去。
+for (const file of ['README.md', 'README.en.md', 'SECURITY.md', 'SECURITY.zh.md', 'package.json', 'host.js', 'client.js']) checkEncoding(file)
+for (const name of notes) checkEncoding('docs/' + name)
 
 console.log(problems.length === 0 ? 'docs parity: OK' : 'docs parity FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

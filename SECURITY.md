@@ -29,13 +29,18 @@ Stated as facts about the code, so the policy is checkable rather than aspiratio
 | Installs or removes skills | **Never** | It reports paths; installation is a separate `dsh plugin` / your script |
 | Sends data anywhere | **Never** | Nothing leaves the process; there is no telemetry |
 | Reads credentials or environment variables | **Never** | No `process.env` access; `process` is not even available in the dynamic-plugin sandbox |
-| Touches the page DOM | **Two calls, both reversible** | `client.js` does only `document.createElement('style')` and `document.head.appendChild` (removed again on unload). It queries and modifies no product-owned DOM node |
+| Touches the page DOM | **Two calls, both reversible** | `client.js` does only `document.createElement('style')` and one `appendChild` into whichever of `head` / `documentElement` / `body` exists (removed again on unload). It queries and modifies no product-owned DOM node |
+| Reads session events | **Read-only, scalars only** | Subscribes to the session ledger and pages backwards through it (capped at 200 pages), taking only scalar leaf fields from `tool/call` events; nothing is copied, serialized or sent anywhere |
 
 In short: the plugin is a **read-only index lookup plus file reader**, with a read-only Client tab on top. Every risk it carries comes from *which files it reads* and *what the model then does with their contents*.
 
 ### What the Client half reads
 
-The usage tab's **entire** input is the `useChat` seat the slot hands the component: it reads `legacy.nodes`, takes those whose `kind` is `assistant`, and from their `blocks` reads only the scalar leaves `kind`, `name` and `arguments` — enough to tell which tool ran and what the skill was called. It copies no node, serializes no node, and sends conversation content nowhere; **nothing reaches the model's context**. The Client half imports no package either (React is supplied by the host), so there is no supply chain to speak of.
+The usage tab's **entire** input is the **session ledger**: the registration declares `inject: (sessionId) => ...`, and the session-scoped slot hands the component that session's `eventSource` (`ctx.sessions.binding(sessionId)` is called exactly once, inside that injection, to obtain the binding). From each snapshot it picks out events whose `type` is `tool/call` and reads only **scalar leaf fields** (`data.callId`, `data.name`, `data.turn`, `data.step`, and the skill name inside `data.arguments`) — enough to tell which loading tool ran and what the skill was called. It copies no event, serializes no event, and sends conversation content nowhere; **nothing reaches the model's context**.
+
+It does **subscribe** to that stream (throttled to 400 ms) and **page** backwards through it (`loadOlder()`, capped at 200 pages): both are read-only, and the subscription is released when the plugin unloads. The Client half imports no package either (React is supplied by the host), so there is no supply chain to speak of.
+
+What it retains in memory is one **deduplicated list of skill names** (`callId + normalized name`) to draw that table; no other part of the conversation is kept or copied.
 
 ## Untrusted content is the real boundary
 

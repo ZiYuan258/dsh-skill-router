@@ -338,24 +338,28 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 
 ```
 技能调用清单
-共 5 次技能加载，涉及 3 个技能。
+共 5 次技能调用，涉及 3 个技能。
 
-1  验证·前置·完成     verification-before-completion   skill_load
-2  写作·规划           writing-plans                    skill
-3  供应链·风险审计     supply-chain-risk-auditor        skill_load
+1  验证·前置·完成     skill_load   第 12 轮
+2  写作·规划           skill        第 12 轮
+3  供应链·风险审计     skill_load   第 31 轮
 ```
 
-**零模型 token。** 标签页的数据全部来自会话本身：这个座位给组件 `useChat`，其 `legacy.nodes` 就是本轮已经持有的对话，技能调用直接从中读出。**没有宿主 RPC、没有投影键、没有网络请求**，也没有任何东西进入模型上下文——插件至今仍然是"从不联网、从不写文件"。
+**零模型 token。** 数据全部来自**会话账本**：标签页注册时声明 `inject: (sessionId) => ({ source })`，`conversation.view` 是会话作用域插槽，渲染器会把该会话的 `eventSource` 展开到组件 props 上——`trajectory`、`chat`、`goal` 三个官方标签页都这样拿会话。**没有宿主 RPC、没有投影键、没有网络请求**，也没有任何东西进入模型上下文——插件至今仍然是"从不联网、从不写文件"。
+
+> **为什么不是 `useChat().legacy.nodes`。** 那正是上一版的做法，而它是**错的**：实测同一时刻 `legacy.nodes` 有 210 个节点、**0 次工具调用**，而账本里有 2778+ 条事件、技能调用就在其中。`legacy.nodes` 是给 UI 看的**截断投影**，不是会话历史。更早的两版也各错一次（猜节点形状；把请求头里本轮的**工具声明**当成加载）。三次都不是崩溃型错误，UI 都画得出来——所以数据契约必须实测，不能推断。
+
+**三态完整性，不谎报数字。** 账本窗口是**有上限**的（实测约 1664–1900 条，见过 3336 → 1664 回落），而且 `hasMore` 在**最新那一页上是 true**：第 0 页是历史的近端，几页之前加载的技能在翻到那里之前根本看不见。所以只有把更早的记录读完（`hasMore === false`）才打印 `共 N 次调用，涉及 M 个技能`；之前显示"已加载 N 个技能名，更早的记录尚未读完"；读不到账本时**只说这一件事**，一个计数都不打印。一次调用点名多个技能时，显示行按 `callId + 规范化技能名` 去重，调用数按 `callId` 去重——同一 `callId` 会在之后每个快照里重新出现，用别的键就会把一次加载数成很多次。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
-- 实际调用的永远是右侧的英文原名，中文形不离开渲染层；
+- 实际调用的永远是英文原名，中文形不离开渲染层；
 - 检索仍走英文原文，`SKILL.md` 与索引**一个字节都没改**；
 - 专名（`azure`、`vercel`、`semgrep`、`figma`…）保持原样——本库名字里最高频的 token 正是 `azure`(148)、`google`(44)，把它们译成中文只会更难认。
 
 翻译是**术语表 + 专名白名单**，不是 872 条整名对照表：短语优先（`best-practices` → 最佳实践），再退到单词（`troubleshooting` → 故障排查），虚词（`and`/`from`/`the`）直接丢弃。
 
-> **它是怎么知道节点形状的。** 字段路径来自对一次真实会话的探针（183 个节点），不是推断：助手节点带 `blocks`，块由 **`kind`** 区分（不是 `type`），技能调用是 `{ kind: 'tool-call', name, arguments }`。此前三个猜测全错——`kind: 'tool-call'` 的独立节点、`node.block.call`、`conv.blocks`。`test/usage.mjs` 的夹具照抄探针输出，`test/client-half.mjs` 则在 `node:vm` 里**真的渲染一次**组件。
+> **事件形状是实测的。** `{ type: 'tool/call', seq, time, data: { turn, step, callId, name, arguments } }`——真实的一次技能调用在 `seq=6228` 被找到，`entries`/`revision` 在会话进行中被看着增长，2778 次订阅回调里有 1447 次是 `assistant/live-chunk` 流式碎片（所以订阅按 400 ms **节流**，不是逐片渲染）。`test/usage-ledger.mjs` 的夹具照抄这个形状，`test/usage-tab.mjs` 通过**浏览器装载客户端半的同一条路径**取到组件并真的渲染它。
 
 ## 工程约束
 
@@ -375,7 +379,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十九个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+二十个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -392,8 +396,9 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
-| `usage.mjs` | 技能看板的数据提取：三种加载工具都算、`skill_search` 不算、`tool-result` 节点不重复计、参数为 JSON 字符串时可解析、坏输入返回空数组而不抛 |
-| `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**真的渲染一次**标签页（中文名、英文原名、计数、缺 `useChat` 座位时降级） |
+| `usage-ledger.mjs` | 技能账本的纯逻辑，夹具照抄实测事件形状：三种加载工具都算、`skill_search` 不算、同一 `callId` 跨页只计一次、一次调用带 `A+B` 两个名字都保留、路径与裸名归并为同一技能、`hasMore` 三态、**窗口挤出后已读到的记录不丢**、坏输入返回空账本而不抛 |
+| `usage-tab.mjs` | 标签页接线，通过**浏览器装载它的同一条路径**取组件再渲染：注册契约、`inject` 声明、两种"读不到账本"的说明、首屏即读且每页只拉一次、`hasMore` 永为真时在上限内停住、第 5 页深埋的调用被找到、200 片流式碎片只排一次渲染、**窗口挤掉最老一条后它仍在清单里** |
+| `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**扫描并拒绝**已证伪的数据契约（`legacy.nodes`、`useChat`、把工具声明当用量）重新出现在代码里 |
 | `package-contract.mjs` | 加载器会读的每一样东西：`exports`/`main`/`dsh.client`/`dsh.bundle`/`files`、客户端半作为**经典脚本**可编译且自带 `load()` 注册、`host.js` 的导出形状、组合行 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
@@ -410,7 +415,7 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十九个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         二十个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
 docs/                         各版本的发布说明（双语，中文在前）

@@ -62,7 +62,10 @@ const loadCalls = (clientCode.match(/window\.__ModuleLoader__\.load\(/g) || []).
 ok('代码里恰有一次 window.__ModuleLoader__.load( 调用', loadCalls === 1, '出现 ' + loadCalls + ' 次')
 ok('注册 id 与包名一致', clientCode.includes("id: '" + manifest.name + "'"))
 ok('factory 接收 require 并在内部取 react（此处没有 React 全局）', /factory:\s*\(require\)\s*=>/.test(clientCode) && clientCode.includes("require('react')"))
-ok('导出 inject 含 slots（服务按插件声明激活，不声明则 ctx.get 拿不到）', /inject:\s*\[\s*'slots'\s*\]/.test(clientCode))
+ok('导出 inject 含 slots（服务按插件声明激活，不声明则 ctx.get 拿不到）', /inject:\s*\[[^\]]*'slots'/.test(clientCode))
+// The ledger itself is not a service lookup: it arrives through the registration's `inject`,
+// which the session-scoped slot calls with the scope's session id.
+ok('标签页注册项声明了 inject', /inject:\s*bindUsageSource/.test(clientCode))
 ok('没有顶层 return', clientCode.split('\n').every((line) => /^return\b/.test(line) === false))
 ok('没有顶层 import/export', /^\s*(import|export)\b/m.test(clientCode) === false)
 ok('不引用任何 @deepseek-ai/* 包', clientCode.includes('@deepseek-ai/') === false)
@@ -119,20 +122,27 @@ for (const [label, source] of [['host.js', hostSource], ['client.js', clientSour
 // resolved. Both were changed in this release, so the equivalence is pinned by RUNNING both
 // rather than by comparing their source text — a text diff is brittle against a `??` versus an
 // explicit null check, which is exactly how the two copies already differ.
-const normNameIn = (source) => {
-  const match = source.match(/function normName\(value\)\s*\{[\s\S]*?\n\s*\}/)
-  return match === null ? undefined : match[0]
+//
+// The two are named differently on purpose: the Host's `normName` takes an already-narrowed
+// value, while the Client's `normalizeSkillName` also has to survive whatever the ledger hands
+// it. The behaviour is what has to match, and that is what is compared here.
+const fnSourceOf = (source, names) => {
+  for (const name of names) {
+    const match = source.match(new RegExp('function ' + name + '\\(value\\)\\s*\\{[\\s\\S]*?\\n\\s*\\}'))
+    if (match !== null) return match[0]
+  }
+  return undefined
 }
-const hostNormSource = normNameIn(hostSource)
-const clientNormSource = normNameIn(clientSource)
-ok('两半都还有 normName（重复实现，改动必须同时落两处）', hostNormSource !== undefined && clientNormSource !== undefined)
+const hostNormSource = fnSourceOf(hostSource, ['normName'])
+const clientNormSource = fnSourceOf(clientSource, ['normalizeSkillName', 'normName'])
+ok('两半都还有名字规范化函数（重复实现，改动必须同时落两处）', hostNormSource !== undefined && clientNormSource !== undefined, 'host=' + (hostNormSource !== undefined) + ' client=' + (clientNormSource !== undefined))
 
 if (hostNormSource !== undefined && clientNormSource !== undefined) {
   // Each needs its own helpers; run each in its own sandbox with just what it references.
   const runNorm = (fnSource, extra) => {
     const sandbox = { console }
     sandbox.globalThis = sandbox
-    const script = new Script('(function () {\n' + extra + '\n' + fnSource + '\nreturn normName\n})()')
+    const script = new Script('(function () {\n' + extra + '\n' + fnSource + '\nreturn ' + fnSource.match(/function (\w+)/)[1] + '\n})()')
     return script.runInContext(createContext(sandbox))
   }
   const stripHelper = 'function stripTrailingSlashes(t) { let e = t.length; while (e > 0 && t.charCodeAt(e - 1) === 47) e -= 1; return e === t.length ? t : t.slice(0, e) }'
@@ -143,9 +153,10 @@ if (hostNormSource !== undefined && clientNormSource !== undefined) {
   let clientFn
   try {
     hostFn = runNorm(hostNormSource, stripHelper)
+    // The Client copy calls `stripTrailingSlashes` too, so it needs the same stand-in helper.
     clientFn = runNorm(clientNormSource, stripHelper)
   } catch (error) {
-    ok('两半的 normName 都能被求值', false, String(error.message).slice(0, 80))
+    ok('两半的规范化函数都能被求值', false, String(error.message).slice(0, 80))
   }
   if (hostFn !== undefined && clientFn !== undefined) {
     const differences = []
@@ -154,8 +165,8 @@ if (hostNormSource !== undefined && clientNormSource !== undefined) {
       const b = clientFn(input)
       if (a !== b) differences.push(JSON.stringify(input) + ' host=' + JSON.stringify(a) + ' client=' + JSON.stringify(b))
     }
-    ok('两半的 normName 在 ' + cases.length + ' 个用例上结果一致', differences.length === 0, differences.join('; '))
-    ok('normName 仍能取出纯技能名', hostFn('Q:/lib/skills/gh-cli/SKILL.md') === 'gh-cli', JSON.stringify(hostFn('Q:/lib/skills/gh-cli/SKILL.md')))
+    ok('两半的规范化在 ' + cases.length + ' 个用例上结果一致', differences.length === 0, differences.join('; '))
+    ok('规范化仍能取出纯技能名', hostFn('Q:/lib/skills/gh-cli/SKILL.md') === 'gh-cli', JSON.stringify(hostFn('Q:/lib/skills/gh-cli/SKILL.md')))
   }
 }
 
