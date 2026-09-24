@@ -165,7 +165,7 @@ The two are **not competitors and can be stacked** — they work at different la
 The plugin walks up to 8 levels from the session working directory looking for `.skill-src/skill-index.tsv`, so the convention is to put the library at the **workspace root**:
 
 ```
-D:\Vibe coding\                     ← you start DSH sessions here
+<your-workspace>\                    ← you start DSH sessions here
 ├─ .skill-src\                      ← the library root; the name is what the plugin looks for
 │  ├─ skill-index.tsv               ← the index (generated in step 3)
 │  ├─ remotion-skills\              ← one upstream repo = one top-level directory
@@ -181,7 +181,7 @@ D:\Vibe coding\                     ← you start DSH sessions here
 Three rules:
 
 1. **The directory must be named `.skill-src`.** The leading dot keeps it invisible to DSH’s skill scanner — that is precisely the mechanism that makes the library free. Name it `skills/`, or put it under `.dsh/skills/`, and DSH will inject **every** skill into every turn, defeating the point of installing this.
-2. **It must sit at or above the session cwd.** If your session starts in `D:\Vibe coding\projects\foo`, the plugin walks up and finds `D:\Vibe coding\.skill-src` — that works.
+2. **It must sit at or above the session cwd.** If your session starts in `<your-workspace>\projects\foo`, the plugin walks up and finds `<your-workspace>\.skill-src` — that works.
 3. **The layout inside does not matter.** The plugin only needs "some directory named like the `repo` column, then the `relpath` column, then `SKILL.md`". An upstream repo mixing `skills/`, `plugins/<name>/skills/` and `antigravity/skills/` can be dropped in as-is.
 
 ### 2. The library lives elsewhere (another drive, another directory)
@@ -190,7 +190,7 @@ The plugin looks for `cwd/.skill-src`, so put a **directory link** at that path 
 
 ```powershell
 # Windows: a junction needs no elevated rights
-New-Item -ItemType Junction -Path "D:\Vibe coding\.skill-src" -Target "E:\skills-archive"
+New-Item -ItemType Junction -Path "D:\work\.skill-src" -Target "E:\skills-archive"
 ```
 
 ```sh
@@ -247,8 +247,8 @@ Checking the index itself by hand:
 
 ```powershell
 # header (6 or 7 columns) and row count
-Get-Content "D:\Vibe coding\.skill-src\skill-index.tsv" -TotalCount 1
-(Import-Csv "D:\Vibe coding\.skill-src\skill-index.tsv" -Delimiter "`t").Count
+Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
+(Import-Csv "D:\work\.skill-src\skill-index.tsv" -Delimiter "`t").Count
 ```
 
 ### 5. Day to day
@@ -259,7 +259,7 @@ Get-Content "D:\Vibe coding\.skill-src\skill-index.tsv" -TotalCount 1
 - To see what is available, ask: "does your skill library have anything about X?" The agent will run `skill_search` and show you.
 - To make a skill **auto-trigger** (no reminder needed each time), that skill has to become resident:
   ```powershell
-  & "D:\Vibe coding\.skill-src\install-more.ps1" -Name remotion-create
+  & "D:\work\.skill-src\install-more.ps1" -Name remotion-create
   ```
   The price is its entry in every turn's catalog — that is what you are buying.
 
@@ -356,6 +356,7 @@ Twelve dependency-free scripts. They run against a real staged library when one 
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
+| `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `node tools/audit-library-risk.mjs` audits any library for risky content.
 
@@ -365,8 +366,7 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `
 host.js                       the plugin: apply(), buildSkillRouterTools(), definePortableTool()
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         twelve runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
-tools/sync-host.mjs           keeps a second host.js checkout in step
+test/                         thirteen runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
 .github/workflows/            CI: npm test on Node 20 / 22 / 24

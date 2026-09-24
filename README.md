@@ -164,7 +164,7 @@ dsh plugin --profile <profile> remove dsh-skill-router
 插件从**会话工作目录往上最多 8 层**找 `.skill-src/skill-index.tsv`。所以惯例是把库放在**工作区根**：
 
 ```
-D:\Vibe coding\                     ← 你在这里开 DSH 会话
+<你的工作区>\                      ← 你在这里开 DSH 会话
 ├─ .skill-src\                      ← 库的根，插件找的就是这个名字
 │  ├─ skill-index.tsv               ← 索引（下一步生成）
 │  ├─ remotion-skills\              ← 一个上游仓库 = 一个顶层目录
@@ -180,7 +180,7 @@ D:\Vibe coding\                     ← 你在这里开 DSH 会话
 两条硬性约定：
 
 1. **目录名必须是 `.skill-src`。** 前导点让它对 DSH 的 skill 扫描器不可见——这正是"库不占目录成本"的机制。若命名为 `skills/` 或放进 `.dsh/skills/`，DSH 会把里面的技能**全部注入每轮上下文**，插件就白装了。
-2. **它必须在会话 cwd 的同级或上级。** 若你的 DSH 会话开在 `D:\Vibe coding\projects\foo`，插件会向上找到 `D:\Vibe coding\.skill-src`——这没问题。
+2. **它必须在会话 cwd 的同级或上级。** 若你的 DSH 会话开在 `<你的工作区>\projects\foo`，插件会向上找到 `<你的工作区>\.skill-src`——这没问题。
 3. **内部结构随意。** 插件只要求"某层的目录名等于 `repo` 列、其下路径等于 `relpath` 列、最后是 `SKILL.md`"。上游仓库那种 `skills/`、`plugins/<name>/skills/`、`antigravity/skills/` 混排的布局原样放着即可。
 
 ### 二、库在别处（别的盘 / 别的目录）
@@ -189,7 +189,7 @@ D:\Vibe coding\                     ← 你在这里开 DSH 会话
 
 ```powershell
 # Windows：junction 不需要管理员权限
-New-Item -ItemType Junction -Path "D:\Vibe coding\.skill-src" -Target "E:\skills-archive"
+New-Item -ItemType Junction -Path "D:\work\.skill-src" -Target "E:\skills-archive"
 ```
 
 ```sh
@@ -248,8 +248,8 @@ $rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -No
 
 ```powershell
 # 表头（应为 6 或 7 列）与行数
-Get-Content "D:\Vibe coding\.skill-src\skill-index.tsv" -TotalCount 1
-(Import-Csv "D:\Vibe coding\.skill-src\skill-index.tsv" -Delimiter "`t").Count
+Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
+(Import-Csv "D:\work\.skill-src\skill-index.tsv" -Delimiter "`t").Count
 ```
 
 ### 五、日常怎么用
@@ -260,7 +260,7 @@ Get-Content "D:\Vibe coding\.skill-src\skill-index.tsv" -TotalCount 1
 - 想知道库里有什么，可以问："你的技能库里有没有跟 X 相关的？" agent 会 `skill_search` 把结果给你看。
 - 想让它**自动触发**某个技能（不必每次提醒），那才需要把它装进常驻区：
   ```powershell
-  & "D:\Vibe coding\.skill-src\install-more.ps1" -Name remotion-create
+  & "D:\work\.skill-src\install-more.ps1" -Name remotion-create
   ```
   代价是它开始进入每轮目录——也就是你付钱买"自动触发"。
 
@@ -362,6 +362,7 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
+| `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 指定要测的技能库；`node tools/audit-library-risk.mjs` 可对任意库做风险审计。
 
@@ -371,8 +372,7 @@ npm test
 host.js                       插件本体：apply()、buildSkillRouterTools()、definePortableTool()
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十二个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
-tools/sync-host.mjs           host.js 双份副本的同步工具
+test/                         十三个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）
 .github/workflows/            CI：Node 20 / 22 / 24 上跑 npm test

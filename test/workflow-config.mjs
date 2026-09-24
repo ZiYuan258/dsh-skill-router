@@ -1,14 +1,24 @@
-// 校验 workflow 修好了：YAML 能解析、permissions 存在且最小、没有重复键。
-// 用手写的最小解析太脆，这里用 Node 读原始文本做结构断言 + 检查 YAML 是否可解析
-// （仓库零依赖，所以不引入 yaml 库：改用 GitHub 自己的解析器来验证——推上去看 CodeQL/CI）。
-import { readdirSync, readFileSync } from 'node:fs'
+// 校验 workflow 的令牌权限与 action 固定版本。
+//
+// 路径必须相对本文件解析。写死绝对路径曾让这个脚本在作者机器上"恰好"通过
+// （工作目录正好是那个包），却在 CI 的 /home/runner 上第一步就 ENOENT 崩掉。
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 
-const dir = 'C:/Users/21450/dsh-plugins/dsh-skill-router/.github/workflows'
+const dir = fileURLToPath(new URL('../.github/workflows/', import.meta.url))
+if (!existsSync(dir)) {
+  console.error('workflow directory not found: ' + dir)
+  process.exit(1)
+}
+
 const files = readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
 const problems = []
 
+if (files.length === 0) problems.push('no workflow files found under ' + dir)
+
 for (const name of files) {
-  const text = readFileSync(dir + '/' + name, 'utf8')
+  const text = readFileSync(join(dir, name), 'utf8')
   const lines = text.split('\n')
   console.log('=== ' + name + '  (' + lines.length + ' lines)')
 
