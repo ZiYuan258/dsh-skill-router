@@ -267,6 +267,9 @@ const mount = (options) => {
     const key = String(sessionId === undefined ? '' : sessionId)
     const scopeBinding = { key: opts.bindingKey === undefined ? sessionId : opts.bindingKey, props: {} }
     const injectedKey = key + '|' + String(scopeBinding.key)
+    // `freshInject` bypasses the cache, modelling a parent that hands over a brand-new props object
+    // on every render. That is the condition a re-entering effect has to survive.
+    if (opts.freshInject === true) injectedFor.delete(injectedKey)
     if (injectedFor.has(injectedKey) === false) {
       let injected
       try {
@@ -579,7 +582,57 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   check('第二个参数回退时确实用了 binding.key', second.bindingCalls.includes('session-key'), 'binding(' + JSON.stringify(second.bindingCalls) + ')')
 }
 
-// --- 9. 卸载时不留悬挂订阅 ------------------------------------------------------
+// --- 10. 父组件重渲染不得让翻页卡死 ---------------------------------------------
+//
+// 这一条来自真机：界面上印着 v1.6.9、状态却是「读取中」——新代码在跑，而看门狗没有兜住。唯一能
+// 同时成立的解释是 effect 被重入：清理跑过一次（`live = false` 让旧看门狗空转），而
+// `inFlightRef` 仍是 true，于是新一轮在守卫处直接早退——**没有任何计时器在跑，也没有任何东西
+// 会再写状态**，标签页就永远停在"读取中"。
+//
+// 触发条件就是父组件重渲染：渲染器把注入结果展开成 props，父组件每次给出新的 props 对象时，
+// 任何"每次渲染都产生新引用"的值都会让 effect 重新进入。所以这里关掉注入缓存，每次算一份新
+// props，断言翻页仍然收敛。
+{
+  const build = () => {
+    const all = [entry(call('r0', 'skill_load', { name: 'churn-a' }))]
+    const source = makeSource({
+      entries: all.slice(),
+      hasMore: true,
+      onLoadOlder: (n) => {
+        all.unshift(entry(call('r' + n, 'pwsh', { command: 'ls' })))
+        return { entries: all.slice(), hasMore: n < 2 }
+      },
+    })
+    const mounted = mount({ source })
+    return { source, ...mounted }
+  }
+
+  const churn = build()
+  const fresh = () => Object.assign({ sessionId: 's1', key: 's1' }, churn.propsFor('s1', { freshInject: true }))
+  churn.fake.render(churn.Component, fresh())
+  // 故意在翻页在途时重渲染：如果 effect 的清理会让在途请求作废，这里就会卡住。
+  churn.fake.render(churn.Component, fresh())
+  await settle(churn.fake, churn.Component, fresh())
+  const text = textOf(churn.fake.render(churn.Component, fresh()))
+  check('父组件重渲染后翻页仍收敛', churn.source.loadOlderCalls === 2, 'loadOlder=' + churn.source.loadOlderCalls)
+  check('重渲染后不残留「读取中」', text.indexOf('读取中') < 0, text.slice(-140))
+  check('重渲染后如实报告已读完', text.indexOf('已读完') >= 0, text.slice(-140))
+
+  // 最坏情况：请求永不 settle，且父组件一直重渲染——看门狗必须仍然到期。
+  const never = makeSource({ entries: [entry(call('n0', 'skill_load', { name: 'churn-b' }))], hasMore: true })
+  never.loadOlder = () => new Promise(() => {})
+  const second = mount({ source: never })
+  const fresh2 = () => Object.assign({ sessionId: 's1', key: 's1' }, second.propsFor('s1', { freshInject: true }))
+  second.fake.render(second.Component, fresh2())
+  second.fake.render(second.Component, fresh2())
+  second.clock.advance(4000)
+  await settle(second.fake, second.Component, fresh2())
+  const stuck = textOf(second.fake.render(second.Component, fresh2()))
+  check('重渲染下令看门狗仍然到期', stuck.indexOf('读取中') < 0, stuck.slice(-140))
+  check('看门狗到期后报告超时停止', stuck.indexOf('超时停止') >= 0, stuck.slice(-140))
+}
+
+// --- 11. 卸载时不留悬挂订阅 -----------------------------------------------------
 {
   const source = makeSource({ entries: [], hasMore: false })
   const { fake, Component, propsFor } = mount({ source })

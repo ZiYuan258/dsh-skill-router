@@ -580,6 +580,36 @@ window.__ModuleLoader__.load({
       const gaveUpRef = React.useRef(false)
       /** Largest window length observed, so "did the read move anything" survives across retries. */
       const seenRef = React.useRef(0)
+      /**
+       * The paging watchdog's handle, held OUTSIDE the effect that starts it.
+       *
+       * This is the fix for the stall observed live with v1.6.9 on screen: the tab printed its
+       * version and sat on "读取中" forever, with the watchdog never firing. The mechanism is
+       * re-entrancy. When the effect re-ran, React ran its cleanup, which set the attempt's local
+       * `live = false`; from then on the pending watchdog callback returned immediately at its
+       * `if (live === false)` guard, while `inFlightRef` stayed true so the new run exited at its
+       * own guard. The result is an attempt that nothing can finish and no timer that can expire —
+       * the one state this tab was built never to enter.
+       *
+       * So the lifetime of an attempt is no longer tied to the effect that starts it: the handle
+       * lives here, and only a real unmount cancels it. A re-entered effect that finds an attempt
+       * in flight simply leaves it alone — which is already what its guards do.
+       *
+       * `test/usage-tab.mjs` reproduces the original stall by re-rendering the view with a brand-new
+       * props object each time; before this change it sat on "读取中" with `loadOlder` called once.
+       */
+      const watchdogRef = React.useRef(undefined)
+      const unmountedRef = React.useRef(false)
+      React.useEffect(
+        () => () => {
+          unmountedRef.current = true
+          if (watchdogRef.current !== undefined) {
+            clearTimeout(watchdogRef.current)
+            watchdogRef.current = undefined
+          }
+        },
+        [],
+      )
       const [state, setState] = React.useState({ page: 0, loading: usable, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
 
       // One long-lived reader. `push` is stable on purpose: an effect that re-subscribed on
@@ -659,33 +689,36 @@ window.__ModuleLoader__.load({
         // attempts and the retry counter — being local — started over every time, which means the
         // limit could never be reached and the tab was back to retrying forever.
         let attempts = 0
-        // Effect-level so the cleanup can always clear it. An earlier revision declared this
-        // inside the request function and then cleared it from the cleanup, which is a
-        // ReferenceError on unmount — a throw in a cleanup takes the tab down with it.
-        let watchdog
         inFlightRef.current = true
         setState((prev) => (prev.loading === true ? prev : { page: prev.page, loading: true, tick: prev.tick }))
 
         const conclude = (patch) => {
-          if (live === false) return
+          if (live === false || unmountedRef.current === true) return
           live = false
-          if (watchdog !== undefined) clearTimeout(watchdog)
+          if (watchdogRef.current !== undefined) {
+            clearTimeout(watchdogRef.current)
+            watchdogRef.current = undefined
+          }
           inFlightRef.current = false
           setState((prev) => Object.assign({ page: prev.page, loading: false, stalled: false, timedOut: false, tick: prev.tick + 1 }, patch))
         }
 
         /** One page request, then judge it by what the WINDOW did — never by the promise alone. */
         const attemptPage = () => {
-          if (live === false) return
+          if (live === false || unmountedRef.current === true) return
           attempts += 1
-          watchdog = setTimeout(() => {
+          watchdogRef.current = setTimeout(() => {
+            watchdogRef.current = undefined
             // No answer at all: stop for good and say so.
             gaveUpRef.current = true
             conclude({ stalled: true, timedOut: true })
           }, LOAD_OLDER_TIMEOUT_MS)
           const judge = (kind, message) => {
-            if (live === false) return
-            clearTimeout(watchdog)
+            if (live === false || unmountedRef.current === true) return
+            if (watchdogRef.current !== undefined) {
+              clearTimeout(watchdogRef.current)
+              watchdogRef.current = undefined
+            }
             if (kind === 'error') {
               conclude({ error: message })
               return
@@ -712,7 +745,10 @@ window.__ModuleLoader__.load({
           try {
             request = source.loadOlder()
           } catch (error) {
-            clearTimeout(watchdog)
+            if (watchdogRef.current !== undefined) {
+              clearTimeout(watchdogRef.current)
+              watchdogRef.current = undefined
+            }
             judge('error', '读取更早的记录失败：' + String(error && error.message ? error.message : error))
             return
           }
@@ -720,21 +756,13 @@ window.__ModuleLoader__.load({
           // non-thenable throws inside an effect. `Promise.resolve` makes the shape irrelevant.
           Promise.resolve(request).then(
             () => judge('settled'),
-            (error) => {
-              clearTimeout(watchdog)
-              judge('error', '读取更早的记录失败：' + String(error === null || error === undefined ? '' : error))
-            },
+            (error) => judge('error', '读取更早的记录失败：' + String(error === null || error === undefined ? '' : error)),
           )
         }
         attemptPage()
 
-        return () => {
-          live = false
-          if (watchdog !== undefined) clearTimeout(watchdog)
-        }
-        // `state.loading` and `state.page` change as a RESULT of this effect and are read through
-        // the refs above; depending on them would re-enter it. `state.tick` is the only signal
-        // that means "the ledger moved, see whether another page is available now".
+        // NOTE: no cleanup here, deliberately — see `watchdogRef`. This effect's job is to START a
+        // paging attempt when none is running; ending one belongs to the attempt itself.
       }, [state.tick, usable, source])
 
       const ledger = React.useMemo(
@@ -883,7 +911,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.6.9'
+    const VERSION = '1.7.0'
 
     function UsageView(props) {
       const { ledger, usable, absent, timedOut } = useUsageLedger(props)
