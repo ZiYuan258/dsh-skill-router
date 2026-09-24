@@ -424,7 +424,14 @@ window.__ModuleLoader__.load({
       // adding to it cannot work — a later page legitimately overlaps calls already counted,
       // and only the keys can tell which.)
       if (opts.previous !== null && typeof opts.previous === 'object' && Array.isArray(opts.previous.files)) {
-        for (let i = 0; i < opts.previous.files.length; i += 1) take(opts.previous.files[i])
+        for (let i = 0; i < opts.previous.files.length; i += 1) {
+          const carried = opts.previous.files[i]
+          // Normalise `seq` on the way in: a carried record from an older build (or one whose event
+          // had no numeric seq) must not poison the sort with NaN, which would compare false in
+          // both directions and scramble the list unpredictably.
+          if (typeof carried.seq !== 'number' || Number.isFinite(carried.seq) === false) carried.seq = Number.MAX_SAFE_INTEGER
+          take(carried)
+        }
       }
 
       const entries = Array.isArray(source) ? source : []
@@ -449,9 +456,19 @@ window.__ModuleLoader__.load({
           kept += 1
           // `take` counts the call on the first row it accepts, so a call naming nothing
           // usable stays uncounted and a re-delivered call stays counted once.
-          take({ id: callId + '::' + skill, callId, skill, tool, turn: data.turn, step: data.step })
+          //
+          // `seq` is carried for ORDERING, not identity. Events arrive newest-first (page 0 is the
+          // recent end) and older pages are prepended as they are fetched, so insertion order is
+          // the reverse of the session's — a live report listed turn 31 above turn 5. `seq` is the
+          // conversation's own monotonic counter, so sorting by it reads as a timeline no matter
+          // what order the pages arrive in.
+          take({ id: callId + '::' + skill, callId, skill, tool, turn: data.turn, step: data.step, seq: typeof event.seq === 'number' ? event.seq : Number.MAX_SAFE_INTEGER })
         }
       }
+
+      // Oldest first, so the list reads as the session did. A record with no numeric `seq` sorts
+      // last rather than jumping the queue.
+      files.sort((a, b) => a.seq - b.seq)
 
       // `hasMore` is true on the newest page, so "complete" cannot be assumed from a full
       // window — it is only ever reached by paging to the start.
@@ -655,7 +672,6 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState({ page: 0, startedAt: usable ? Date.now() : 0, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
       const reading = state.startedAt !== 0 && Date.now() - state.startedAt < LOAD_OLDER_TIMEOUT_MS
       DIAG.mounts += 1
-      const mountIdRef = React.useRef(DIAG.mounts)
       React.useEffect(
         () => () => {
           unmountedRef.current = true
@@ -877,7 +893,6 @@ window.__ModuleLoader__.load({
         // Module-lifetime: they keep counting across remounts, so a remount storm shows up as
         // `mounts` climbing while the per-instance counters stay at zero.
         mounts: DIAG.mounts,
-        mountId: mountIdRef.current,
         effectRuns: DIAG.effectRuns,
         heartbeats: DIAG.heartbeats,
         canPage,
@@ -897,6 +912,7 @@ window.__ModuleLoader__.load({
       '.sr-usage-empty{opacity:.75}',
       '.sr-usage-note{margin-top:14px;opacity:.6;font-size:11px}',
       '.sr-usage-ver{position:sticky;bottom:0;margin-top:10px;padding-top:6px;opacity:.35;font-size:10px;font-family:var(--dsh-font-mono,ui-monospace,monospace);border-top:1px solid rgba(127,127,127,.12)}',
+      '.sr-usage-diag{opacity:.22;font-size:10px;font-family:var(--dsh-font-mono,ui-monospace,monospace);word-break:break-all}',
     ].join('\n')
 
     // A Client bundle has no styles.insert (that is a dynamic-sandbox builtin), so the
@@ -1013,7 +1029,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.8.0'
+    const VERSION = '1.8.1'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
@@ -1053,13 +1069,18 @@ window.__ModuleLoader__.load({
         React.createElement(
           'p',
           { className: 'sr-usage-ver' },
-          'dsh-skill-router v' + VERSION
-            + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut)
-            + ' · 尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
-            + ' · 挂载 ' + String(diag.mounts) + '(#' + String(diag.mountId) + ')'
+          'dsh-skill-router v' + VERSION + ' · 第 ' + ledger.page + ' 页 · ' + coverageStateOf(ledger, timedOut) + ' · 可翻页 ' + (diag.canPage === true ? '是' : '否'),
+        ),
+        // Diagnostics on their own line, dimmer than the verdict above it. They existed to answer
+        // "is the code even running", and they answered it; keeping them one line below means a
+        // report can quote the verdict without dragging the counters along.
+        React.createElement(
+          'p',
+          { className: 'sr-usage-diag' },
+          '尝试 ' + String(diag.attempts) + '/收尾 ' + String(diag.concludes)
             + ' · effect ' + String(diag.effectRuns)
             + ' · 心跳 ' + String(diag.heartbeats)
-            + ' · 可翻页 ' + (diag.canPage === true ? '是' : '否'),
+            + ' · 记录 ' + String(ledger.files.length) + ' 行/' + String(ledger.calls) + ' 次调用/' + String(ledger.uniqueSkills) + ' 个技能',
         ),
       )
     }

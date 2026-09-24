@@ -126,8 +126,9 @@ check('第 0 页读到较新的调用，且标为未读完', names(first).join()
 // 第二页到来时，窗口里可能已经不含 late（被挤出），但累积状态里必须还在。
 const page1 = entries([call('early', 'skill_load', { name: 'earlier-one' }, 1)])
 const second = buildLedger(page1, { hasMore: false, previous: first })
-check('窗口挤出后先读到的记录不丢', names(second).join() === 'later-one,earlier-one', JSON.stringify(names(second)))
-check('顺序稳定：先记到的在前', names(second)[0] === 'later-one', JSON.stringify(names(second)))
+check('窗口挤出后先读到的记录不丢', names(second).sort().join() === 'earlier-one,later-one', JSON.stringify(names(second)))
+// 注意断的是**会话顺序**（seq 小的在前），不是"读到的先后"：真机上读到的先后恰好是反的。
+check('按会话顺序排列：seq 小的在前，而不是先读到的在前', names(second).join() === 'earlier-one,later-one', JSON.stringify(names(second)))
 check('累积后完整性变为 complete', second.completeness === 'complete', second.completeness)
 check('调用计数在合并后仍然正确', second.calls === 2, 'calls=' + second.calls)
 
@@ -151,6 +152,23 @@ for (const weird of [undefined, null, 'x', 42, {}, [null, 7, 'x'], entries([null
 check('缺 callId 的调用被跳过（无法去重就不能计数）', buildLedger(entries([call('', 'skill_load', { name: 'x' })]), {}).calls === 0)
 check('arguments 为 null 的调用被跳过', buildLedger(entries([call('c', 'skill_load', null)]), {}).calls === 0)
 check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && splitNames(42).join() === '42' && splitNames(['a', null, '', 'a']).join() === 'a', JSON.stringify(splitNames(['a', null, '', 'a'])))
+
+// --- 9. 顺序：按事件自己的 seq，而不是读到的先后 --------------------------------
+//
+// 真机报告暴露了这条：列表是**倒序**的（第 31 轮排在第 5 轮前面）。原因是事件本来就以"最新在前"
+// 到达，而更早的页是**前插**进来的，于是"读到的先后"恰好是会话顺序的反面。`seq` 是会话自己的
+// 单调计数，按它排序才是时间线——无论页以什么顺序到达。
+{
+  const newest = buildLedger(entries([call('c3', 'skill_load', { name: 'third' }, 300), call('c2', 'skill_load', { name: 'second' }, 200)]), {})
+  check('页 0 是新的一端（读入顺序是最新在前）', names(newest).join() === 'second,third', JSON.stringify(names(newest)))
+  const older = buildLedger(entries([call('c1', 'skill_load', { name: 'first' }, 100)]), { previous: newest })
+  check('回填更早的页后按会话顺序排列（first 在前）', names(older).join() === 'first,second,third', JSON.stringify(names(older)))
+  check('回填不改变计数', older.calls === 3 && older.uniqueSkills === 3, 'calls=' + older.calls)
+  const sameSeq = buildLedger(entries([call('m', 'skill_load', { names: 'alpha,beta' }, 50)]), {})
+  check('同一 seq 的多行保持稳定顺序', names(sameSeq).join() === 'alpha,beta', JSON.stringify(names(sameSeq)))
+  const noSeq = buildLedger(entries([{ type: 'tool/call', data: { callId: 'x', name: 'skill_load', arguments: { name: 'no-seq' } } }, call('y', 'skill_load', { name: 'has-seq' }, 10)]), {})
+  check('缺 seq 的记录排在最后而不是最前', names(noSeq).join() === 'has-seq,no-seq', JSON.stringify(names(noSeq)))
+}
 
 console.log(problems.length === 0 ? '\n技能账本: OK' : '\n技能账本 FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

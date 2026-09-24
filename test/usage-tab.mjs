@@ -406,11 +406,15 @@ check('inject 收到的 sessionId 被用来取绑定', loaded.propsFor('session-
 {
   const text = textOf(loaded.fake.render(loaded.Component, loaded.propsFor('s1')))
   check('标签页印出运行版本', /dsh-skill-router v\d+\.\d+\.\d+/.test(text), text.slice(-140))
-  check('标签页印出翻页状态', /(已读完|读取中|无进展停止|超时停止|到上限停止|出错)/.test(text), text.slice(-140))
+  check('标签页印出翻页状态', /(已读完|读取中|无进展停止|超时停止|到上限停止|无读取入口|出错)/.test(text), text.slice(-140))
   // 「尝试 0」+「读取中」= effect 压根没启动过；这是无法从外部区分的那类事实，所以它必须印出来。
-  check('标签页印出尝试/收尾计数（区分「没启动」与「启动了没收敛」）', /尝试 \d+\/收尾 \d+/.test(text), text.slice(-140))
-  // 模块级计数：单实例的计数器在"反复重挂"面前会全部归零，那时只有跨实例的计数能说明问题。
-  check('标签页印出跨实例计数（挂载/effect/心跳）', /挂载 \d+\(#\d+\)/.test(text) && /effect \d+/.test(text) && /心跳 \d+/.test(text), text.slice(-160))
+  check('标签页印出尝试/收尾计数（区分「没启动」与「启动了没收敛」）', /尝试 \d+\/收尾 \d+/.test(text), text.slice(-220))
+  check('标签页印出 effect/心跳计数', /effect \d+/.test(text) && /心跳 \d+/.test(text), text.slice(-220))
+  // 「可翻页」必须写在**结论那一行**：它是判读"翻页有没有入口"的唯一字段，不该埋在诊断里。
+  const verdict = (loaded.fake.render(loaded.Component, loaded.propsFor('s1')).children || [])
+    .map((child) => (child && child.props && child.props.className === 'sr-usage-ver' ? textOf(child) : ''))
+    .join('')
+  check('结论行写明是否可翻页', /可翻页 [是否]/.test(verdict), verdict)
 }
 
 // --- 2. 座位缺席：给一句话，绝不冒充「读了但没有」 ------------------------------
