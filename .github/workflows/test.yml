@@ -20,8 +20,10 @@ jobs:
       matrix:
         node: ['20.x', '22.x', '24.x']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Pinned to a major version tag, never @main: a floating ref lets the action's
+      # owner change what runs in this job without a commit here.
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
       # No install step on purpose: the plugin has zero runtime dependencies and the
