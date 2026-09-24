@@ -365,11 +365,26 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 
 // --- 3. 分页：首屏就读，每页只拉一次，到底就停 ---------------------------------
 {
+  /**
+   * 一个会**累积**的账本。
+   *
+   * 这里必须是累积的：真实窗口是"往里 prepend 一页"，所以翻一页它就变长一次，而产品正是靠
+   * "窗口有没有变长"来判断这一页有没有真的读到——`loadOlder()` 在会话还没打开时会静默空转
+   * （见 client.js 里的说明），所以 promise resolve 不等于读到了。
+   *
+   * 早先的夹具每页返回一个**只含那一页的全新数组**，于是窗口长度恒为 1、"无进展"恒为真：
+   * 桩模拟了一个现实中不存在的账本，然后让正确的实现看起来是错的。夹具比现实更简单，
+   * 和夹具比现实更友好一样危险。
+   */
   const build = (hasMoreAt) => {
+    const all = [entry(call('c0', 'skill_load', { name: 'page-zero' }))]
     const source = makeSource({
-      entries: [entry(call('c0', 'skill_load', { name: 'page-zero' }))],
+      entries: all.slice(),
       hasMore: true,
-      onLoadOlder: (n) => ({ entries: [entry(call('c' + n, 'pwsh', { command: 'ls' }))], hasMore: hasMoreAt === undefined ? true : n < hasMoreAt }),
+      onLoadOlder: (n) => {
+        all.unshift(entry(call('c' + n, 'pwsh', { command: 'ls' })))
+        return { entries: all.slice(), hasMore: hasMoreAt === undefined ? true : n < hasMoreAt }
+      },
     })
     const mounted = mount({ source })
     return { source, props: mounted.propsFor('s1'), ...mounted }
@@ -402,12 +417,15 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
 
 // --- 4. 深埋的调用：第 5 页才出现的技能必须被找到 -------------------------------
 {
+  // 同样是累积的账本：第 5 页才出现那次技能调用，它必须被翻到。
+  const all = [entry(call('c0', 'pwsh', { command: 'ls' }))]
   const source = makeSource({
-    entries: [entry(call('c0', 'pwsh', { command: 'ls' }))],
+    entries: all.slice(),
     hasMore: true,
-    onLoadOlder: (n) => (n < 5
-      ? { entries: [entry(call('c' + n, 'pwsh', { command: 'ls' }))], hasMore: true }
-      : { entries: [entry(call('deep', 'skill_load', { name: 'buried-skill' }))], hasMore: false }),
+    onLoadOlder: (n) => {
+      all.unshift(n < 5 ? entry(call('c' + n, 'pwsh', { command: 'ls' })) : entry(call('deep', 'skill_load', { name: 'buried-skill' })))
+      return { entries: all.slice(), hasMore: n < 5 }
+    },
   })
   const { fake, Component, propsFor } = mount({ source })
   const props = propsFor('s1')
@@ -522,7 +540,7 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
     fake.flush(Component, props)
     const after = textOf(fake.render(Component, props))
     check('看门狗到期后不再说「仍在继续」', after.indexOf('仍在继续') < 0, after.slice(0, 240))
-    check('看门狗到期后说明已停止读取', after.indexOf('不再继续读取') >= 0, after.slice(0, 240))
+    check('看门狗到期后说明读取没有回应', after.indexOf('读取更早记录没有回应') >= 0, after.slice(0, 240))
     check('停住后不打印「共 N 次调用」', after.indexOf('本会话共 ') < 0, after.slice(0, 240))
     check('停住后仍列出已读到的技能', after.indexOf('stuck-then-ok') >= 0, after.slice(0, 240))
     const callsAtStall = never.loadOlderCalls

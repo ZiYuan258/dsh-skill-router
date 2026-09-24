@@ -484,10 +484,31 @@ window.__ModuleLoader__.load({
      * a fake source that counts `loadOlder` calls.
      */
     const LOAD_OLDER_CAP = 200
-    // How long one page request may take before the tab gives up and says so. Without a bound, a
-    // request that never settles leaves the reader on "正在读取更早的记录…" for the life of the
-    // session — which is exactly what a live tab was observed doing.
+    // How long one page request may take before it is treated as no answer at all.
     const LOAD_OLDER_TIMEOUT_MS = 8000
+    // How many consecutive requests that change nothing before paging gives up for good.
+    //
+    // This is the fix for the live stall, and the reason is worth keeping: the real
+    // `SessionController.loadOlder()` is not a request that hangs, it is a request that SILENTLY
+    // DOES NOTHING on several conditions —
+    //
+    //   async loadOlder() {
+    //     if (this.openState !== 'open' || !this.hasMore || this.loadingOlder) return  // ← three
+    //     const events = this.events
+    //     if (events === undefined) return                                            // ← and a fourth
+    //     ...
+    //
+    // — and "resolved" therefore does not mean "a page arrived". A session still opening makes
+    // the tab's very first call a no-op that resolves instantly. Counting that as a page read
+    // left `page` and `loading` showing "still reading" forever, with a row already on screen:
+    // exactly the state observed live.
+    //
+    // So the measurement is the WINDOW, not the promise: the shipped tab does the same thing —
+    // it snapshots before and after, and treats "unchanged" as "nothing older to read"
+    // (`await session.loadOlder(); return trajectory.getSnapshot() !== before`). One no-op is
+    // not enough to conclude that, though: the session may simply still be opening, so a retry
+    // follows, and only a run of no-ops ends the paging.
+    const LOAD_OLDER_NO_PROGRESS_LIMIT = 2
     // One `tool/call` per snapshot in the best case, but streaming fragments arrive per chunk
     // — ~1,447 of 2,778 observed callbacks were `assistant/live-chunk`. Rendering per fragment
     // would spend the tab's budget on redraws of unchanged data; 400 ms is below the threshold
@@ -549,11 +570,13 @@ window.__ModuleLoader__.load({
       }
       const pageRef = React.useRef(0)
       const inFlightRef = React.useRef(false)
-      // Set when paging gave up (timeout or the cap). It stops the paging effect from ever
-      // starting again, so a ledger whose `hasMore` never clears cannot spin in the background
-      // for the life of the tab — the tab settles on "partial" and says so instead.
-      const stalledRef = React.useRef(false)
-      const [state, setState] = React.useState({ page: 0, loading: usable, stalled: false, error: usable ? null : absent, tick: 0 })
+      // Set when paging gave up (a run of no-ops, a timeout, or the cap). It stops the paging
+      // effect from ever re-arming, so a ledger whose `hasMore` never clears cannot spin in the
+      // background for the life of the tab — the tab settles on "partial" and says so instead.
+      const gaveUpRef = React.useRef(false)
+      /** Largest window length observed, so "did the read move anything" survives across retries. */
+      const seenRef = React.useRef(0)
+      const [state, setState] = React.useState({ page: 0, loading: usable, stalled: false, timedOut: false, error: usable ? null : absent, tick: 0 })
 
       // One long-lived reader. `push` is stable on purpose: an effect that re-subscribed on
       // every snapshot would detach and reattach the observable on each new event, and the
@@ -567,7 +590,7 @@ window.__ModuleLoader__.load({
         // symptom was 399 `loadOlder` calls against a cap of 200, and it only shows up on a
         // ledger whose history never ends. Only the paging effect and `loadOlder`'s own
         // resolution may write `loading`; this callback only says "the window moved".
-        setState((prev) => ({ page: prev.page, loading: prev.loading, stalled: prev.stalled, error: prev.error, tick: prev.tick + 1 }))
+        setState((prev) => ({ page: prev.page, loading: prev.loading, stalled: prev.stalled, timedOut: prev.timedOut, error: prev.error, tick: prev.tick + 1 }))
       }, [usable, source])
 
       React.useEffect(() => {
@@ -603,75 +626,107 @@ window.__ModuleLoader__.load({
       // long before the doubling can show.
       React.useEffect(() => {
         if (usable === false || typeof source.loadOlder !== 'function') return undefined
-        if (stalledRef.current === true) return undefined
-        if (windowOf(source.getSnapshot()).hasMore === false) {
+        if (gaveUpRef.current === true) return undefined
+        const before = windowOf(source.getSnapshot())
+        // The largest window seen so far, remembered across retries. Comparing against the
+        // effect's opening snapshot is not enough: when a retry does bring a page, the snapshot
+        // has already grown by then, so `after > before` is satisfied by the PREVIOUS attempt's
+        // page and the retry that actually produced it would be judged a no-op. (A test caught
+        // exactly that.) A retry that sees anything new is progress, not a stall.
+        if (before.entries.length > seenRef.current) seenRef.current = before.entries.length
+        if (before.hasMore === false) {
           // Nothing to page. The initial state cannot know that — it is seeded with `usable` so
           // the first paint already says "reading" instead of showing an unfinished count — so
           // it is cleared here. Without this a session whose window is fully loaded would sit on
           // "正在读取更早的记录…" forever.
-          setState((prev) => (prev.loading === true ? { page: prev.page, loading: false, stalled: prev.stalled, error: prev.error, tick: prev.tick } : prev))
+          setState((prev) => (prev.loading === true ? { page: prev.page, loading: false, tick: prev.tick } : prev))
           return undefined
         }
         if (inFlightRef.current === true) return undefined
         if (pageRef.current >= LOAD_OLDER_CAP) {
-          // The cap is a stop, not a pause. Marking it stalled keeps the UI honest ("the cap was
-          // reached") and keeps this effect from re-arming on every later tick.
-          stalledRef.current = true
-          setState((prev) => (prev.stalled === true ? prev : { page: prev.page, loading: false, stalled: true, error: prev.error, tick: prev.tick }))
+          gaveUpRef.current = true
+          setState((prev) => (prev.stalled === true ? prev : { page: prev.page, loading: false, stalled: true, timedOut: false, tick: prev.tick }))
           return undefined
         }
-        inFlightRef.current = true
+
         let live = true
-        setState((prev) => (prev.loading === true ? prev : { page: prev.page, loading: true, stalled: prev.stalled, error: prev.error, tick: prev.tick }))
-        // Watchdog. A page request that never settles leaves the tab saying "正在读取更早的记录…"
-        // forever — observed live, at page 0, on a session with nothing to page through. A read
-        // that cannot finish must degrade to "partial" and say so, so the tab always states
-        // something true within a few seconds.
-        const watchdog = setTimeout(() => {
+        // The whole attempt sequence runs INSIDE this one effect, and only its CONCLUSION writes
+        // state. An earlier revision wrote state after each attempt, so the effect re-ran between
+        // attempts and the retry counter — being local — started over every time, which means the
+        // limit could never be reached and the tab was back to retrying forever.
+        let attempts = 0
+        // Effect-level so the cleanup can always clear it. An earlier revision declared this
+        // inside the request function and then cleared it from the cleanup, which is a
+        // ReferenceError on unmount — a throw in a cleanup takes the tab down with it.
+        let watchdog
+        inFlightRef.current = true
+        setState((prev) => (prev.loading === true ? prev : { page: prev.page, loading: true, tick: prev.tick }))
+
+        const conclude = (patch) => {
           if (live === false) return
           live = false
-          stalledRef.current = true
+          if (watchdog !== undefined) clearTimeout(watchdog)
           inFlightRef.current = false
-          setState((prev) => ({ page: prev.page, loading: false, stalled: true, error: prev.error, tick: prev.tick + 1 }))
-        }, LOAD_OLDER_TIMEOUT_MS)
-        const done = (next) => {
-          if (live === false) return
-          live = false
-          clearTimeout(watchdog)
-          inFlightRef.current = false
-          if (next === 'ok') pageRef.current += 1
-          const page = pageRef.current
-          // `tick` MUST move on resolution: it is the only dependency that means "ask whether
-          // another page is available". Without this the first page resolves into a state
-          // change that never re-enters the effect, so paging stops at page 0 while the UI keeps
-          // showing the loading line — the exact stall observed in the running browser.
-          setState((prev) => ({
-            page,
-            loading: false,
-            stalled: next === 'stalled',
-            error: next === 'ok' ? null : String(next),
-            tick: prev.tick + 1,
-          }))
+          setState((prev) => Object.assign({ page: prev.page, loading: false, stalled: false, timedOut: false, tick: prev.tick + 1 }, patch))
         }
-        let request
-        try {
-          request = source.loadOlder()
-        } catch (error) {
-          done('读取更早的记录失败：' + String(error && error.message ? error.message : error))
-          return () => {
-            live = false
+
+        /** One page request, then judge it by what the WINDOW did — never by the promise alone. */
+        const attemptPage = () => {
+          if (live === false) return
+          attempts += 1
+          watchdog = setTimeout(() => {
+            // No answer at all: stop for good and say so.
+            gaveUpRef.current = true
+            conclude({ stalled: true, timedOut: true })
+          }, LOAD_OLDER_TIMEOUT_MS)
+          const judge = (kind, message) => {
+            if (live === false) return
             clearTimeout(watchdog)
+            if (kind === 'error') {
+              conclude({ error: message })
+              return
+            }
+            const after = windowOf(source.getSnapshot())
+            if (after.entries.length > seenRef.current) {
+              // The window actually grew: that is a page read, whatever the promise said.
+              seenRef.current = after.entries.length
+              pageRef.current += 1
+              conclude({ page: pageRef.current, error: null })
+              return
+            }
+            // Settled, but nothing arrived. The real `loadOlder()` silently does nothing while
+            // the session is still opening, so one no-op proves nothing; a run of them means the
+            // history is not going to arrive and the tab must stop claiming it is reading it.
+            if (attempts >= LOAD_OLDER_NO_PROGRESS_LIMIT) {
+              gaveUpRef.current = true
+              conclude({ stalled: true, timedOut: false })
+              return
+            }
+            attemptPage()
           }
+          let request
+          try {
+            request = source.loadOlder()
+          } catch (error) {
+            clearTimeout(watchdog)
+            judge('error', '读取更早的记录失败：' + String(error && error.message ? error.message : error))
+            return
+          }
+          // A host-side read is not guaranteed to answer with a promise, and `.then` on a
+          // non-thenable throws inside an effect. `Promise.resolve` makes the shape irrelevant.
+          Promise.resolve(request).then(
+            () => judge('settled'),
+            (error) => {
+              clearTimeout(watchdog)
+              judge('error', '读取更早的记录失败：' + String(error === null || error === undefined ? '' : error))
+            },
+          )
         }
-        // A host-side read is not guaranteed to answer with a promise, and `.then` on a non-thenable
-        // throws inside an effect. `Promise.resolve` makes the shape irrelevant.
-        Promise.resolve(request).then(
-          () => done('ok'),
-          (error) => done('读取更早的记录失败：' + String(error === null || error === undefined ? '' : error)),
-        )
+        attemptPage()
+
         return () => {
           live = false
-          clearTimeout(watchdog)
+          if (watchdog !== undefined) clearTimeout(watchdog)
         }
         // `state.loading` and `state.page` change as a RESULT of this effect and are read through
         // the refs above; depending on them would re-enter it. `state.tick` is the only signal
@@ -687,7 +742,16 @@ window.__ModuleLoader__.load({
       // cases stay distinct in the copy as well: "the service is missing" and "this session has
       // no ledger" are different problems, and a single message would misdirect whoever reads it.
       // `stalled` is carried out too, so the view can say "paging gave up" rather than "reading".
-      return { ledger, loading: state.loading, page: state.page, stalled: state.stalled === true, error: state.error, usable, absent: usable ? null : absent }
+      return {
+        ledger,
+        loading: state.loading,
+        page: state.page,
+        stalled: state.stalled === true,
+        timedOut: state.timedOut === true,
+        error: state.error,
+        usable,
+        absent: usable ? null : absent,
+      }
     }
 
     // ── the tab ─────────────────────────────────────────────────────────────────
@@ -775,20 +839,25 @@ window.__ModuleLoader__.load({
     }
 
     /** The footer's honesty about how much history was actually read. */
-    function coverageOf(ledger) {
+    function coverageOf(ledger, timedOut) {
       if (ledger.completeness === 'complete') return '已读到本会话最早一条记录，上面的数字是完整的。'
       if (ledger.completeness === 'error') return '读取更早记录时出错：' + ledger.error
       // `stalled` is spelled out rather than dressed up as "still reading": the difference between
       // "there is more and I am fetching it" and "there is more and I have stopped trying" is the
       // whole reason this line exists.
       if (ledger.completeness === 'loading') return '已读到第 ' + ledger.page + ' 页更早的记录，仍在继续。'
+      // Three ways to stop, and they mean different things to whoever is debugging: the request
+      // answered but moved nothing (the ledger's own read is a no-op right now), the request
+      // never answered, or the paging cap was reached.
+      if (timedOut === true) return '读取更早记录没有回应，已停止——上面的数字只是这部分的。'
+      if (ledger.page === 0) return '账本暂时没有交出更早的记录（sessions.loadOlder 无进展），已停止——上面的数字只是这部分的。'
       return '已读到第 ' + ledger.page + ' 页更早的记录，之后不再继续读取——上面的数字只是这部分的。'
     }
 
     const NOTE = '中文名仅用于显示。技能名是 skill_load、索引检索与 /skill 命令的匹配键，实际调用的始终是英文原名；检索仍走英文原文，SKILL.md 未被修改。'
 
     function UsageView(props) {
-      const { ledger, usable, absent } = useUsageLedger(props)
+      const { ledger, usable, absent, timedOut } = useUsageLedger(props)
 
       // No ledger to read: say that, and say ONLY that. The summary and coverage lines below
       // are statements about data that was read, so printing them here would turn "I could not
@@ -818,7 +887,7 @@ window.__ModuleLoader__.load({
         React.createElement('h3', null, '技能调用清单'),
         head,
         ledger.files.length === 0 ? null : React.createElement('div', null, listOf(ledger)),
-        React.createElement('p', { className: 'sr-usage-note' }, coverageOf(ledger)),
+        React.createElement('p', { className: 'sr-usage-note' }, coverageOf(ledger, timedOut)),
         React.createElement('p', { className: 'sr-usage-note' }, NOTE),
       )
     }
