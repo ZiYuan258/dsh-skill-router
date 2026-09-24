@@ -4,7 +4,24 @@
 `/releases` 页面上的 Release 必须**另外创建**。这个仓库曾经连续 14 个版本只推了 tag
 （tag 页 30 个、Release 页停在 15 个），直到有人翻发行版页面才发现——那种不一致没人会收到通知。
 
-## 顺序
+## 什么时候才发版
+
+**版本号只在插件行为变化时才动。** 判断标准是"装上它的人会不会观察到不同"：
+
+| 改动 | 是否发版 |
+|---|---|
+| `host.js` / `client.js` 的行为、`package.json` 的元数据（入口、`dsh.bundle`、依赖） | **要**，补丁位 +1 |
+| 工具脚本、文档、测试、CI 配置 | **不要**，直接提交 `main` |
+
+工具、文档、测试没有版本号也能正常工作，给它们发版会让版本历史看起来像"插件更新了很多次"。
+
+> 这条规则是吃了一次教训写下的：我曾为了"多一个测试脚本 + 一个发布脚本"发了一版 v1.9.2，
+> 事后撤回。当时我说"新版本需要发布说明，而检查要求如此"——**那是把因果说反了**：不是"要发版
+> 所以写说明"，而是"我 bump 了一版，于是自己的检查要求我补说明"。检查是用来防"漏建 Release"
+> 的，不该被用来给"每次提交都发版"背书。`test/release-consistency.mjs` 里那条"当前版本必须有
+> 发布说明"已删除，正是因为它会强迫这件事。
+
+## 顺序（只在发版时执行）
 
 ```sh
 # 1. 改版本号：两处必须一致，test/package-contract.mjs 会核对
@@ -51,5 +68,6 @@ node tools/publish-release.mjs --all      # 回填所有缺 Release 的版本
 |---|---|
 | 版本号两处一致 | `npm test` → `package contract` 里的版本断言 |
 | 发布说明双语且中文在前 | `npm test` → `docs parity` |
-| tag 已推送 | `git ls-remote --tags origin \| grep vX.Y.Z` |
+| 发布说明格式（标题带版本号、文件名规范） | `npm test` → `发版一致性` |
+| tag 已推送 | `git ls-remote --tags origin` 里有 `vX.Y.Z` |
 | **Release 已创建** | `node tools/publish-release.mjs --check`，或打开 `/releases` |

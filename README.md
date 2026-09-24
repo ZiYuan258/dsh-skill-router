@@ -440,12 +440,12 @@ npm test
 | `package-contract.mjs` | 加载器会读的每一样东西：`exports`/`main`/`dsh.client`/`dsh.bundle`/`files`、客户端半作为**经典脚本**可编译且自带 `load()` 注册、`host.js` 的导出形状、组合行 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
 | `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
-| `release-consistency.mjs` | 发版一致性（离线部分）：两处版本号一致、当前版本有发布说明、每份说明的标题以自己版本号开头、双语齐全、每个版本 tag 都有说明、流程文档与发布脚本都在 |
+| `release-consistency.mjs` | 发版一致性（离线部分）：两处版本号一致、每份发布说明的标题以自己版本号开头且双语齐全、文件名规范、流程文档与发布脚本都在。**有意不检查"当前版本必须有说明"**——那会变成"每次提交都得发一版"的强制来源（见 `RELEASING.md` 的版本策略） |
 | `no-local-paths.mjs` | 代码与配置里没有本机绝对路径；文档里的示例路径有意排除在外 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 指定要测的技能库；`node tools/audit-library-risk.mjs` 可对任意库做风险审计。
 
-发版流程见 `RELEASING.md`：**tag 与 Release 是两个对象**，`git push` 只推送前者，所以最后一步是 `node tools/publish-release.mjs`（漏了不会有人收到通知，本仓库曾因此连续 14 个版本只有 tag 没有 Release）。
+发版流程与**版本策略**见 `RELEASING.md`：版本号只在插件行为变化时才动；**tag 与 Release 是两个对象**，`git push` 只推送前者，所以发版的最后一步是 `node tools/publish-release.mjs`（漏了不会有人收到通知，本仓库曾因此连续 14 个版本只有 tag 没有 Release）。
 
 `node tools/audit-client-halves.mjs` 不在 `npm test` 里，这是有意的：它扫的是**你本机** profile 里所有插件的客户端半，不具备自包含性——装了别人的坏插件时它应该报出来（那是诊断），但不该让本仓库的测试无故变红。它存在的原因是本插件让 DSH 启动失败过两次，而报错只点名 HMR，真正坏掉的那份在列表中间。
 

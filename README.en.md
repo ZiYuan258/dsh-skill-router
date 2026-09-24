@@ -435,12 +435,12 @@ Twenty-one dependency-free scripts. They run against a real staged library when 
 | `package-contract.mjs` | everything the loader reads: `exports`/`main`/`dsh.client`/`dsh.bundle`/`files`, the Client half compiling as a **classic script** and registering itself via `load()`, the Host exports, the composed row |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
 | `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
-| `release-consistency.mjs` | release consistency, offline half: both version strings agree, the current version has notes, every notes heading starts with its own version, every notes file is bilingual, every version tag has notes, and the process doc plus the release script exist |
+| `release-consistency.mjs` | release consistency, offline half: both version strings agree, every notes heading starts with its own version, every notes file is bilingual and correctly named, and the process doc plus the release script exist. It deliberately does **not** require notes for the current version — that would force a release for every commit (see the versioning policy in `RELEASING.md`) |
 | `no-local-paths.mjs` | no machine-specific absolute paths in code or config; example paths in the docs are deliberately excluded |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `node tools/audit-library-risk.mjs` audits any library for risky content.
 
-The release process is in `RELEASING.md`: **a tag and a Release are two different objects**, `git push` only delivers the former, so the last step is `node tools/publish-release.mjs`. Skipping it notifies nobody — this repository spent fourteen versions with tags but no Releases before anyone looked at the releases page.
+The release process and its **versioning policy** are in `RELEASING.md`: the version number moves only when plugin behaviour changes; **a tag and a Release are two different objects**, `git push` only delivers the former, so the last step of a release is `node tools/publish-release.mjs`. Skipping it notifies nobody — this repository spent fourteen versions with tags but no Releases before anyone looked at the releases page.
 
 `node tools/audit-client-halves.mjs` is deliberately **not** in `npm test`: it scans the Client halves of every plugin installed in **your** profile, so it is not self-contained. It should report a broken third-party plugin (that is the diagnostic), but it must not turn this repository's suite red for someone else's defect. It exists because this plugin broke DSH startup twice, and the report named only HMR while the broken file sat in the middle of the list.
 

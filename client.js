@@ -1165,7 +1165,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.9.2'
+    const VERSION = '1.9.1'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
