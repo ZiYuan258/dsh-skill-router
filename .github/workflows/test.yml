@@ -6,6 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege, declared explicitly. Without this block the run gets the repository
+# default for GITHUB_TOKEN, which is broader than a checkout-and-test job needs — and any
+# code that executes inside the job (a third-party action, a hijacked dependency) inherits
+# whatever that token can do. This job only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

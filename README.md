@@ -346,7 +346,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-十一个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+十二个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -361,6 +361,7 @@ npm test
 | `index-format.mjs` | 索引格式契约：6 列与 7 列都可解析、表头按形状识别、真库仍可用 |
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `docs-parity.mjs` | 双语文档不漂移：README 对、SECURITY 对、发布说明中文在前 |
+| `workflow-config.mjs` | CI 配置本身：`permissions` 显式且只给 `contents: read`、action 固定版本、无 tab 缩进 |
 
 用 `SKILL_LIBRARY_ROOT=/path/to/workspace` 指定要测的技能库；`node tools/audit-library-risk.mjs` 可对任意库做风险审计。
 
@@ -370,7 +371,7 @@ npm test
 host.js                       插件本体：apply()、buildSkillRouterTools()、definePortableTool()
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         十一个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         十二个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/sync-host.mjs           host.js 双份副本的同步工具
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 docs/                         各版本的发布说明（双语，中文在前）

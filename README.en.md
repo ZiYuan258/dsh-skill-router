@@ -340,7 +340,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Eleven dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Twelve dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -355,6 +355,7 @@ Eleven dependency-free scripts. They run against a real staged library when one 
 | `index-format.mjs` | the index-format contract: 6- and 7-column files both parse, the header is found by shape, the live index still works |
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `docs-parity.mjs` | bilingual docs do not drift: the README pair, the SECURITY pair, Chinese-first release notes |
+| `workflow-config.mjs` | the CI config itself: explicit `permissions` limited to `contents: read`, actions pinned to a version, no tab indentation |
 
 Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `node tools/audit-library-risk.mjs` audits any library for risky content.
 
@@ -364,7 +365,7 @@ Point them at a specific library with `SKILL_LIBRARY_ROOT=/path/to/workspace`; `
 host.js                       the plugin: apply(), buildSkillRouterTools(), definePortableTool()
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         eleven runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         twelve runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/sync-host.mjs           keeps a second host.js checkout in step
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 docs/                         per-version release notes (bilingual, Chinese first)
