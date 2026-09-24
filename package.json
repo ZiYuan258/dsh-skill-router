@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-router",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "DeepSeek Harness plugin adding the skill_search / skill_load / skill_ref tools and a 技能 tab that lists what the session actually loaded, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
   "license": "MIT",
   "private": true,

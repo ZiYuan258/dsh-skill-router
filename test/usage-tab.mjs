@@ -255,19 +255,33 @@ const mount = (options) => {
    * 否则测试会在一个真实不存在的时序上做断言。
    */
   const injectedFor = new Map()
-  const propsFor = (sessionId) => {
+  /**
+   * 组装组件真正会收到的 props——和渲染器做的一样：调用注册项的 inject，再展开。
+   *
+   * 第二个参数是**作用域绑定**。渲染器的 `runInject` 就是 `inject(binding.key, actions)`，而这段
+   * 作用域绑定的 key 就是会话 id。之前的版本只传了一个参数、桩里也是 undefined，于是"两个参数都
+   * 试"这条回退路径从来没被跑到；只传 1 个参数的替身，验证不到渲染器真正传的东西。
+   */
+  const propsFor = (sessionId, options) => {
+    const opts = options === undefined ? {} : options
     const key = String(sessionId === undefined ? '' : sessionId)
-    if (injectedFor.has(key) === false) {
+    const scopeBinding = { key: opts.bindingKey === undefined ? sessionId : opts.bindingKey, props: {} }
+    const injectedKey = key + '|' + String(scopeBinding.key)
+    if (injectedFor.has(injectedKey) === false) {
       let injected
       try {
-        injected = typeof registration.meta.inject === 'function' ? registration.meta.inject(sessionId) : {}
+        injected = typeof registration.meta.inject === 'function'
+          ? opts.callInjectWith === 'binding-only'
+            ? registration.meta.inject(undefined, scopeBinding)
+            : registration.meta.inject(sessionId, scopeBinding)
+          : {}
       } catch (error) {
         injected = { sourceError: '注入失败：' + String(error && error.message ? error.message : error) }
       }
-      injectedFor.set(key, injected)
+      injectedFor.set(injectedKey, injected)
     }
     // `key` mirrors what the renderer's per-session identity does: a session switch must remount.
-    return Object.assign({ sessionId, key }, injectedFor.get(key))
+    return Object.assign({ sessionId, key: opts.bindingKey === undefined ? key : String(opts.bindingKey) }, injectedFor.get(injectedKey))
   }
   return { plugin, fake, clock, registrations, registration, propsFor, bindingCalls, Component: registration === undefined ? undefined : registration.Component, meta: registration === undefined ? undefined : registration.meta }
 }
@@ -473,7 +487,22 @@ for (const seat of ['no-service', 'no-binding', 'no-source']) {
   check('换会话后读到的是那个会话的账本', b.indexOf('skill-in-b') >= 0 && b.indexOf('skill-in-a') < 0, b.slice(0, 200))
 }
 
-// --- 8. 卸载时不留悬挂订阅 ------------------------------------------------------
+// --- 8. inject 的两个参数都能用 -------------------------------------------------
+// 渲染器按作用域绑定的 key 调 inject；第二个参数只在带上下文的渲染路径上被传。所以两种都必须
+// 能拿到账本——只赌其中一个，就是在赌渲染器走哪条路。
+{
+  const source = makeSource({ entries: [entry(call('k1', 'skill_load', { name: 'via-key' }))], hasMore: false })
+  const first = mount({ source })
+  const viaFirst = textOf(first.fake.render(first.Component, first.propsFor('session-key')))
+  check('inject 第一个参数（binding.key）能取到账本', viaFirst.indexOf('via-key') >= 0, viaFirst.slice(0, 160))
+
+  const second = mount({ source })
+  const viaBinding = textOf(second.fake.render(second.Component, second.propsFor('session-key', { callInjectWith: 'binding-only' })))
+  check('inject 第二个参数（作用域绑定）也能取到账本', viaBinding.indexOf('via-key') >= 0, viaBinding.slice(0, 160))
+  check('第二个参数回退时确实用了 binding.key', second.bindingCalls.includes('session-key'), 'binding(' + JSON.stringify(second.bindingCalls) + ')')
+}
+
+// --- 9. 卸载时不留悬挂订阅 ------------------------------------------------------
 {
   const source = makeSource({ entries: [], hasMore: false })
   const { fake, Component, propsFor } = mount({ source })

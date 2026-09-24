@@ -784,15 +784,22 @@ window.__ModuleLoader__.load({
      * what makes the tab follow a session switch: the injected props are cached per session, so
      * the identity changes when the session does.
      *
-     * A missing or not-yet-resolvable session returns a message rather than throwing. `binding()`
-     * answers `undefined` for a session that is neither listed nor already scoped, and a throw
-     * here would take down the whole tab row instead of one tab in it.
+     * Both arguments are accepted, and the order between them is deliberate. The slot catalog
+     * for `conversation.view` exposes `sessionId: SessionId` as a standard prop, and the
+     * renderer calls a registration's inject with the scope binding's KEY — while a second
+     * argument is only threaded through the contextual-render path. So the first is the one to
+     * trust and `binding.key` is the fallback.
+     *
+     * A missing or not-yet-resolvable session returns a message rather than throwing.
+     * `binding()` answers `undefined` for a session that is neither listed nor already scoped,
+     * and a throw here would take down the whole tab row instead of one tab in it.
      */
-    function bindUsageSource(sessionId) {
+    function bindUsageSource(sessionId, binding) {
       const sessions = ctx.get('sessions')
       if (sessions === undefined) return { sourceError: '会话服务缺席（ctx.get("sessions") 为空）。' }
-      const binding = typeof sessions.binding === 'function' ? sessions.binding(sessionId) : undefined
-      const source = binding === null || binding === undefined ? undefined : binding.eventSource
+      const key = sessionId !== undefined && sessionId !== null ? sessionId : binding === null || binding === undefined ? undefined : binding.key
+      const resolved = typeof sessions.binding === 'function' ? sessions.binding(key) : undefined
+      const source = resolved === null || resolved === undefined ? undefined : resolved.eventSource
       if (source === null || source === undefined) return { sourceError: '这个会话的账本还不可用（sessions.binding 没有返回 eventSource）。' }
       return { source }
     }

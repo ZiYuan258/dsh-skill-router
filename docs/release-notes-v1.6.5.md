@@ -16,6 +16,8 @@
 
 `legacy.nodes` 是**给 UI 看的截断投影**，不是历史。判定方式不是读代码猜，是在跑着的会话里同时取两份数据对比——这也是这三次改错的共同教训：**假设必须实测**。
 
+> **一处需要更正的措辞。** 我在提交说明里写过"这个座位在会话 UI 里根本不存在"——**那句话是错的**。现场插槽目录里 `conversation.view` 的 `standardProps` 明确列着 `useChat: UseChat`，它由 `dsh-client-ui-chat` 通过 `uiSession.provide` 提供。所以第三版**确实拿到了座位**，它只是从一个截断投影里读数据。座位在、数据不对，和"座位不在"是两回事——而我只验证了一半就下了结论。
+
 ## 改成什么
 
 唯一权威来源是会话账本。而**账本是怎么到达组件的**，本身就是一份必须照抄的契约：
@@ -85,6 +87,8 @@ slots.register({
 The skill tab used to read `useChat`'s `legacy.nodes` and assume it was the session history. **That assumption was false**, in the worst way: nothing crashes, nothing throws, the UI renders — it simply always says "no skills loaded yet".
 
 **Three inferred data sources, one measurement.** A `kind: 'tool-call'` node (a guess about the shape); per-turn tool *declarations* read from request headers (counting skills merely *offered* to the model as loaded — a session reported as "skill_load × 23" had loaded nothing); and `legacy.nodes`, falsified by taking both readings at once in a live session: **210 nodes, ZERO tool calls**, against a session ledger holding 2,778+ events with the skill calls in it. `legacy.nodes` is a truncated UI projection, not history.
+
+**One wording to correct.** My commit message claimed the seat "does not exist in the conversation UI at all". That was **wrong**: the live slot catalog lists `useChat: UseChat` among the standard props of `conversation.view`, provided by `dsh-client-ui-chat` through `uiSession.provide`. The third version did receive a real seat — it just read a truncated projection from it. A seat that is present with wrong data is a different finding from a seat that is absent, and I concluded after verifying only half of that.
 
 **The authoritative source is the ledger**, and how it reaches the component is itself a contract worth copying: `conversation.view` is a session-scoped slot, so the renderer calls the registration's `inject(sessionId)` with the scope binding's key and spreads the result over the component's props — which is how `trajectory`, `chat` and `goal` all reach their session.
 
