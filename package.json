@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-router",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "DeepSeek Harness Host plugin adding the skill_search / skill_load tools, so an agent can find and load any skill from a staged library instead of paying for every skill in the session catalog.",
   "license": "MIT",
   "private": true,
