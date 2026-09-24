@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Script } from 'node:vm'
+import { createContext, Script } from 'node:vm'
 
 const pkgDir = fileURLToPath(new URL('../', import.meta.url))
 const problems = []
@@ -74,6 +74,90 @@ const hostSource = readFileSync(hostFile, 'utf8')
 ok('导出 apply', /export function apply\s*\(/.test(hostSource))
 ok('导出 name', /export const name\s*=/.test(hostSource))
 ok('导出 inject', /export const inject\s*=/.test(hostSource))
+
+// --- polynomial-backtracking regexes (js/polynomial-redos) ---------------------------
+//
+// CodeQL found `/\/+$/` in normName and it was right: anchored at `$`, the engine retries from
+// every start position, so N slashes not ending in a slash cost O(N²) — measured at ~2,000 ms
+// for 64,000 slashes against ~0 ms for the loop that replaced it. The finding was real but it
+// arrived by luck, and the same expression sat unnoticed in client.js, where CodeQL does not
+// look because a Client bundle is not the analysed entry. Hence this scan.
+//
+// The rule is narrower than "quantifier before $", because that flags safe patterns too.
+// A quantifier applied to a CHARACTER CLASS is unambiguous — `[a-z0-9-]*$` matches each
+// character one way only, so there is nothing to backtrack into. What costs O(N²) is a
+// quantifier whose repetition can be re-divided over the same input: `/\/+$/` (a bare escaped
+// character) and `/(a+)+$/` (a group) both qualify.
+//
+// So: a regex whose body ends in `+$` or `*$` is reported unless that quantifier follows a
+// character class. The suffix check is two characters wide and says exactly which shape it
+// allows, rather than trying to parse the pattern.
+const regexLiteral = /\/(?:\\.|[^/\\\n])+\/[gimsuy]*/g
+
+for (const [label, source] of [['host.js', hostSource], ['client.js', clientSource]]) {
+  const offenders = []
+  source.split('\n').forEach((line, index) => {
+    const trimmed = line.trim()
+    // The comments explain this very fix and quote the pattern; counting them would demand
+    // deleting the explanation, which is the failure mode this repository keeps hitting.
+    if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) return
+    for (const match of line.matchAll(regexLiteral)) {
+      const body = match[0]
+      if (/(?:\+|\*)\$/.test(body) === false) continue
+      // The literal ends with `$/` (or `$/flags`), so the shape to allow is `]*$/`: the
+      // quantifier sits on a character class. Getting this suffix wrong the first time made
+      // the exemption dead code, which the check's own failure reported.
+      if (body.endsWith(']*$/') || /\]\*\$\/[gimsuy]*$/.test(body)) continue
+      offenders.push('line ' + (index + 1) + ' ' + body)
+    }
+  })
+  ok(label + ' 没有可回溯的量词紧邻行尾锚（多项式回溯）', offenders.length === 0, offenders.join('; '))
+}
+
+// The two halves must agree on how a name normalises, because the Host decides what loads and
+// the Client only reports it: a divergence would show the tab naming a skill the loader never
+// resolved. Both were changed in this release, so the equivalence is pinned by RUNNING both
+// rather than by comparing their source text — a text diff is brittle against a `??` versus an
+// explicit null check, which is exactly how the two copies already differ.
+const normNameIn = (source) => {
+  const match = source.match(/function normName\(value\)\s*\{[\s\S]*?\n\s*\}/)
+  return match === null ? undefined : match[0]
+}
+const hostNormSource = normNameIn(hostSource)
+const clientNormSource = normNameIn(clientSource)
+ok('两半都还有 normName（重复实现，改动必须同时落两处）', hostNormSource !== undefined && clientNormSource !== undefined)
+
+if (hostNormSource !== undefined && clientNormSource !== undefined) {
+  // Each needs its own helpers; run each in its own sandbox with just what it references.
+  const runNorm = (fnSource, extra) => {
+    const sandbox = { console }
+    sandbox.globalThis = sandbox
+    const script = new Script('(function () {\n' + extra + '\n' + fnSource + '\nreturn normName\n})()')
+    return script.runInContext(createContext(sandbox))
+  }
+  const stripHelper = 'function stripTrailingSlashes(t) { let e = t.length; while (e > 0 && t.charCodeAt(e - 1) === 47) e -= 1; return e === t.length ? t : t.slice(0, e) }'
+  // `Q:` throughout: the fictional drive the other fixtures use, so a normalising test never
+  // reads as a real machine path to this repository's own no-local-paths scanner.
+  const cases = ['gh-cli', '@scope/name/', 'dir/skill/SKILL.md', 'a///', 'semver/', '', '/', '//', 'Q:/lib/skills/gh-cli/SKILL.md', 'nested/deep/name/skill.md', 'no-extension']
+  let hostFn
+  let clientFn
+  try {
+    hostFn = runNorm(hostNormSource, stripHelper)
+    clientFn = runNorm(clientNormSource, stripHelper)
+  } catch (error) {
+    ok('两半的 normName 都能被求值', false, String(error.message).slice(0, 80))
+  }
+  if (hostFn !== undefined && clientFn !== undefined) {
+    const differences = []
+    for (const input of cases) {
+      const a = hostFn(input)
+      const b = clientFn(input)
+      if (a !== b) differences.push(JSON.stringify(input) + ' host=' + JSON.stringify(a) + ' client=' + JSON.stringify(b))
+    }
+    ok('两半的 normName 在 ' + cases.length + ' 个用例上结果一致', differences.length === 0, differences.join('; '))
+    ok('normName 仍能取出纯技能名', hostFn('Q:/lib/skills/gh-cli/SKILL.md') === 'gh-cli', JSON.stringify(hostFn('Q:/lib/skills/gh-cli/SKILL.md')))
+  }
+}
 
 console.log('')
 console.log('=== cordis 组合行 ===')

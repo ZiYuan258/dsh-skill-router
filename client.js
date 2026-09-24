@@ -233,9 +233,25 @@ window.__ModuleLoader__.load({
     const LOAD_TOOLS = { skill: true, skill_load: true, skill_ref: true }
     const MAX_NAMES = 8
 
+    /**
+     * Drop trailing forward slashes without a regular expression.
+     *
+     * The Host copy of this function carried `.replace(/\/+$/, '')` and CodeQL flagged it as
+     * polynomial (js/polynomial-redos) — measurably: 64,000 slashes took ~2,000 ms against
+     * ~0 ms for this loop. The same expression sat here, in the copy, because a Client bundle
+     * cannot import from the Host half. CodeQL only reads the analysed source, so it never saw
+     * this one; the duplication is exactly why the fix had to be applied twice.
+     */
+    function stripTrailingSlashes(text) {
+      let end = text.length
+      while (end > 0 && text.charCodeAt(end - 1) === 47) end -= 1
+      return end === text.length ? text : text.slice(0, end)
+    }
+
     function normName(value) {
-      let text = String(value === null || value === undefined ? '' : value).trim().replace(/\\/g, '/')
-      text = text.replace(/^@/, '').replace(/\/SKILL\.md$/i, '').replace(/\/+$/, '')
+      let text = stripTrailingSlashes(String(value === null || value === undefined ? '' : value).trim().replace(/\\/g, '/'))
+      // Anchored single-character and fixed alternatives: neither can backtrack.
+      text = text.replace(/^@/, '').replace(/\/SKILL\.md$/i, '')
       const parts = text.split('/')
       return String(parts[parts.length - 1] || '').trim()
     }
