@@ -343,7 +343,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.10.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -392,7 +392,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.10.1 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -463,7 +463,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Twenty-three dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Twenty-four dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -480,6 +480,7 @@ Twenty-three dependency-free scripts. They run against a real staged library whe
 | `minimal-host.mjs` | degradation with only `ctx.fs` injected: all three tools work, optional APIs absent without crashing |
 | `link-support.mjs` | search and load still work when `.skill-src` is a directory link (Windows junction / POSIX symlink); reports a skip when the runner refuses to create one |
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
+| `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
 | `discovery-dry-run.mjs` | the discovery dry run, which **really calls `apply(ctx)` and drives `agent/pre-step` the way the agent loop does**: three tools plus the listener register, the decision is left untouched, telemetry is written, only step 1 is recorded, a Chinese task records `no-searchable-token`, a `reject` passes through, and **no user text appears in the telemetry** |
 | `usage-ledger.mjs` | the ledger's pure logic (59 assertions), with fixtures copying the observed event shape: all three loading tools count, `skill_search` does not, one event counts once across pages, **two different events sharing one `callId` still count as two**, a call naming `A+B` keeps both, a path and a bare name resolve to one skill, the three completeness states, **records survive window eviction**, **ordering follows `seq` (the session's order, not the arrival's)**, **the row/call relationship holds structurally** (`calls ≤ rows`, equality exactly when no call named several skills), and malformed input returns an empty ledger instead of throwing |
@@ -504,7 +505,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         twenty-three runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         twenty-four runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

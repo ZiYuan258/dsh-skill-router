@@ -51,6 +51,24 @@ function checkPair(label, defaultFile, alternateFile, facts) {
   if (fences(a) !== fences(b)) problems.push(`${label}: fenced blocks differ (${fences(a)} vs ${fences(b)})`)
   if (tableRows(a) !== tableRows(b)) problems.push(`${label}: table rows differ (${tableRows(a)} vs ${tableRows(b)})`)
 
+  // 重复的标题，两个文件各查一遍。
+  //
+  // 这一条来自一次真实的损坏：README.en.md 被一次坏替换**整段复制**了一遍（第 10 行到末尾），
+  // 而上面那三条计数**一条都没红**——因为两个文件的内容和结构本来就不一样，重复之后数量仍然
+  // "看起来正常"。是读者会发现"读着读着又回到了开头"，不是测试。
+  //
+  // 计不了数的东西要单独查：一个 L2 标题在文档里出现两次，几乎总是拼接事故。
+  for (const [name, text] of [[defaultFile, a], [alternateFile, b]]) {
+    const seen = new Map()
+    for (const line of text.split('\n')) {
+      if (/^##\s/.test(line) === false) continue
+      const key = line.trim()
+      seen.set(key, (seen.get(key) ?? 0) + 1)
+    }
+    const dupes = [...seen].filter(([, n]) => n > 1)
+    if (dupes.length > 0) problems.push(`${label}: ${name} repeats a section heading (${dupes.map(([k, n]) => JSON.stringify(k.slice(0, 40)) + ' ×' + n).join(', ')})`)
+  }
+
   for (const fact of facts) {
     if (!a.includes(fact)) problems.push(`${label}: ${defaultFile} is missing ${JSON.stringify(fact)}`)
     if (!b.includes(fact)) problems.push(`${label}: ${alternateFile} is missing ${JSON.stringify(fact)}`)

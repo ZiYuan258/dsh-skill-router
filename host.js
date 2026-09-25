@@ -129,10 +129,20 @@ function isRecord(value) {
  * The input is a skill name read from the index or a tool argument, so the practical exposure
  * is small — it is a local file, and there is no network path. It is still a free fix, and a
  * loop is not merely faster: it cannot backtrack at all.
+ *
+ * It strips BOTH separators, because the regex it replaces (`/[\\/]+$/`) did: a Windows path
+ * ending in `\` must lose it too. It first stripped only `/`, which silently made it an
+ * inequivalent substitute for the three other call sites still using that regex — measured, it
+ * disagreed on 8 of 19 cases, all backslash-terminated, and the first of those call sites reads
+ * the session cwd (a Windows cwd commonly ends in `\`).
  */
 function stripTrailingSlashes(text) {
   let end = text.length
-  while (end > 0 && text.charCodeAt(end - 1) === 47) end -= 1
+  while (end > 0) {
+    const code = text.charCodeAt(end - 1)
+    if (code !== 47 && code !== 92) break
+    end -= 1
+  }
   return end === text.length ? text : text.slice(0, end)
 }
 
@@ -591,13 +601,13 @@ export function buildSkillRouterTools(ctx, register) {
   async function resolveRow(row) {
     const joined = joinPath(joinPath(joinPath(rootDir, row.repo), row.relpath), 'SKILL.md')
     let path = joined
-    let directory = joined.slice(0, Math.max(0, joined.length - 'SKILL.md'.length)).replace(/[\\/]+$/, '')
+    let directory = stripTrailingSlashes(joined.slice(0, Math.max(0, joined.length - 'SKILL.md'.length)))
     let missing = false
     try {
       const target = await ctx.fs.resolve(joined)
       const display = String(target.displayPath ?? joined)
       path = display
-      directory = display.slice(0, Math.max(0, display.length - 'SKILL.md'.length)).replace(/[\\/]+$/, '')
+      directory = stripTrailingSlashes(display.slice(0, Math.max(0, display.length - 'SKILL.md'.length)))
       const info = await ctx.fs.stat(target)
       missing = info === undefined
     } catch {
@@ -608,7 +618,7 @@ export function buildSkillRouterTools(ctx, register) {
 
   /** Walk up from the session cwd to the directory holding .skill-src/skill-index.tsv. */
   async function resolveRoot(cwd) {
-    let dir = String(cwd ?? '').replace(/[\\/]+$/, '')
+    let dir = stripTrailingSlashes(String(cwd ?? ''))
     // Eight levels is a floor, not a recommendation: the library is normally at the
     // workspace root, and this only has to cover a session started in a nested project.
     for (let i = 0; i < 8 && dir !== ''; i += 1) {
@@ -628,7 +638,7 @@ export function buildSkillRouterTools(ctx, register) {
         if (info !== undefined && info.type === 'file') {
           const display = target.displayPath
           const parent = display.slice(0, Math.max(0, display.length - 'skill-index.tsv'.length))
-          return { root: parent.replace(/[\\/]+$/, ''), indexTarget: target, version: String(info.version) }
+          return { root: stripTrailingSlashes(parent), indexTarget: target, version: String(info.version) }
         }
       }
       const cut = Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\'))
