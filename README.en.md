@@ -175,6 +175,21 @@ Others in the family include `MJorgin/dsh-skill-router` (rule-first pre-step rou
 
 ## Usage
 
+### 0. It works once installed (nothing to set up first)
+
+**The plugin ships with a starter library** (5 skills covering *search before guessing*, *evidence before claims*, *debug with evidence*, *scope before building*, and *report results clearly*). When you have no library of your own, that is the library — restart DSH and `skill_search` has something to find immediately:
+
+```
+skill_search "debug"
+→ debug-with-evidence     ← from the starter library bundled with the plugin
+```
+
+The result carries **`starterLibrary: true`** and a `library:` path inside the plugin package. **Seeing that flag means you are reading the starter library, not your own** — the two situations call for completely different diagnosis, so they have to be distinguishable.
+
+> **The starter skills never enter the resident catalog.** They live under the plugin's `resources/starter-skills/` and go through `skill_search` / `skill_load` like any other library skill; not one byte reaches the per-turn model catalog. Putting them in `.dsh/skills/` would inject them into every turn — which would destroy the entire point of this plugin. `test/starter-library.mjs` asserts this.
+
+Shipping 5 rather than 1,000 is **deliberate**: the problem this plugin solves is *a large library that must not stay resident*. Bundling a large one would bring package size, update lag, license mixing and version coupling all at once. For real coverage, attach your own library (section 1).
+
 ### 1. Where the library lives
 
 The plugin walks up to 8 levels from the session working directory looking for `.skill-src/skill-index.tsv`, so the convention is to put the library at the **workspace root**:
@@ -201,10 +216,10 @@ Three rules:
 
 ### 2. The library lives elsewhere (another drive, another directory)
 
-The plugin looks for `cwd/.skill-src`, so put a **directory link** at that path pointing wherever the library actually is. This is tested (`node tools/check-link-support.mjs` re-verifies it):
+The plugin looks for `cwd/.skill-src`, so when the library lives elsewhere, put a **directory link** in the workspace. Measured to work (Windows junction / POSIX symlink; verify with `node tools/check-link-support.mjs`):
 
 ```powershell
-# Windows: a junction needs no elevated rights
+# Windows: a junction needs no administrator rights
 New-Item -ItemType Junction -Path "D:\work\.skill-src" -Target "E:\skills-archive"
 ```
 
@@ -221,31 +236,26 @@ ln -s /mnt/skills-archive "/home/me/work/.skill-src"
 
 Any writer will do, as long as it emits those columns. A reference implementation (PowerShell, for a library of upstream repos checked out under one directory):
 
-```powershell
-$rows = Get-ChildItem $root -Directory | ForEach-Object {
-  $repo = $_
-  Get-ChildItem $repo.FullName -Recurse -File -Filter 'SKILL.md' | ForEach-Object {
-    $text = Get-Content $_.FullName -Raw
-    $name = ''; $desc = ''
-    if ($text -match '(?s)^\uFEFF?---\s*\r?\n(.*?)\r?\n---') {
-      $fm = $Matches[1]
-      if ($fm -match '(?m)^name:\s*(.+?)\s*$') { $name = $Matches[1].Trim() }
-      if ($fm -match '(?ms)^description:\s*(.+?)(?=\r?\n[a-zA-Z_-]+:\s|\z)') {
-        $desc = ($Matches[1] -replace '\s+', ' ').Trim() -replace '^[>|][+-]?\s*', ''
-      }
-    }
-    [pscustomobject]@{
-      repo = $repo.Name
-      relpath = $_.Directory.FullName.Substring($repo.FullName.Length).TrimStart('\')
-      name = $name; description = $desc
-      files = 1; KB = [math]::Round($_.Length / 1KB)
-    }
-  }
-}
-$rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -NoTypeInformation -Encoding UTF8
+```sh
+node tools/build-index.mjs <library-root>          # writes <library-root>/skill-index.tsv
+node tools/build-index.mjs <library-root> --check  # reports drift only (exit 1 when stale)
+node tools/doctor.mjs --root <library-root>        # check-up: path / count / stale / duplicates
 ```
 
-**Use a real CSV writer** (`Export-Csv`, `csv.writer`, …). Hand-joining columns with tabs breaks the moment a description contains a tab, a quote or a newline — the reference implementation above was bitten by exactly that. Re-run it when the library changes (see "when the library changes" in step 6).
+Zero dependencies, cross-platform. It does four things: finds every `SKILL.md`, parses the YAML frontmatter, computes `relpath` **relative to the repo root** (not the library root — one extra level and nothing resolves, which is the bug its first version shipped), and writes real TSV escaping so a description containing a tab, quote or newline cannot break the columns. The `whenToUse` column is written only when at least one row has it.
+
+**After this you never hand-edit the index again.** Re-run it when the library changes; if you forget, `doctor` says so — it compares "on disk" against "in the index" in both directions.
+
+<details>
+<summary>Why the "write your own generator" advice is gone (the old PowerShell reference implementation)</summary>
+
+That block was a script you had to copy and edit a `$root` in. It worked, with two problems:
+
+1. **the index format is the plugin's internal data model**, and it should not be part of the install flow;
+2. it **scanned one level only** (`$root/<repo>/**`), **never emitted `whenToUse`**, and **missed skills without frontmatter** — the reference library had 3 of those (in a Microsoft monorepo), so they could never be found. Measured: `build-index.mjs` produces 1,028 rows for that library while the old reference implementation's index held 1,025.
+
+The index is still a **public contract**: anything that emits those 7 columns can replace `build-index.mjs`. The contract is the table above.
+</details>
 
 ### 4. Verify it works
 
@@ -356,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -405,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 

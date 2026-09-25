@@ -174,6 +174,21 @@ GitHub 上这个名字下并存 **8 个**仓库（本仓库是其中最新的一
 
 ## 使用方法
 
+### 零、装完就能用（不需要先准备任何东西）
+
+**插件自带一个入门技能库**（5 个，覆盖"先搜再动手 / 用证据说话 / 带着证据调试 / 先定范围 / 把结果讲清楚"）。你没有自己的库时，它就是这个库——重启 DSH 之后 `skill_search` 立刻有东西可搜：
+
+```
+skill_search "debug"
+→ debug-with-evidence     ← 来自插件自带的入门库
+```
+
+返回值里会带 **`starterLibrary: true`**，以及 `library:` 指向插件包内的路径。**看到这个标记就说明你读的是入门库，不是自己的库**——这两种情况的诊断方向完全不同，所以它必须能分辨。
+
+> **入门技能不会被塞进常驻目录。** 它们在插件包的 `resources/starter-skills/` 下，走的是 `skill_search` / `skill_load` 这条路，一个字节都不进每轮的模型目录。把入门技能放进 `.dsh/skills/` 会立刻让它们每轮进上下文——那正好毁掉这个插件的全部意义。`test/starter-library.mjs` 里有一条断言专门守这件事。
+
+自带 5 个而不是 1000 个是**有意的**：这个插件解决的问题就是"大库不要常驻"。往包里塞一个大库会同时带来包体、更新、许可证与版本绑定四类问题。想要真正的能力覆盖，就把你自己的库接上去（下面第一节）。
+
 ### 一、把库放到哪里
 
 插件从**会话工作目录往上最多 8 层**找 `.skill-src/skill-index.tsv`。所以惯例是把库放在**工作区根**：
@@ -220,31 +235,26 @@ ln -s /mnt/skills-archive "/home/me/work/.skill-src"
 
 索引由谁生成都行——只要能产出那几列。参考实现（PowerShell，适用于把多个上游仓库检出一到同一目录）：
 
-```powershell
-$rows = Get-ChildItem $root -Directory | ForEach-Object {
-  $repo = $_
-  Get-ChildItem $repo.FullName -Recurse -File -Filter 'SKILL.md' | ForEach-Object {
-    $text = Get-Content $_.FullName -Raw
-    $name = ''; $desc = ''
-    if ($text -match '(?s)^\uFEFF?---\s*\r?\n(.*?)\r?\n---') {
-      $fm = $Matches[1]
-      if ($fm -match '(?m)^name:\s*(.+?)\s*$') { $name = $Matches[1].Trim() }
-      if ($fm -match '(?ms)^description:\s*(.+?)(?=\r?\n[a-zA-Z_-]+:\s|\z)') {
-        $desc = ($Matches[1] -replace '\s+', ' ').Trim() -replace '^[>|][+-]?\s*', ''
-      }
-    }
-    [pscustomobject]@{
-      repo = $repo.Name
-      relpath = $_.Directory.FullName.Substring($repo.FullName.Length).TrimStart('\')
-      name = $name; description = $desc
-      files = 1; KB = [math]::Round($_.Length / 1KB)
-    }
-  }
-}
-$rows | Export-Csv -Path (Join-Path $root 'skill-index.tsv') -Delimiter "`t" -NoTypeInformation -Encoding UTF8
+```sh
+node tools/build-index.mjs <你的库根>          # 生成 / 覆盖 <库根>/skill-index.tsv
+node tools/build-index.mjs <你的库根> --check  # 只报告是否与磁盘一致（不一致则退出码 1）
+node tools/doctor.mjs --root <你的库根>        # 体检：路径 / 技能数 / 过期 / 重名 / 索引状态
 ```
 
-**请用真正的 CSV 写入器**（`Export-Csv`、`csv.writer` 之类）。手工用制表符拼列会在描述含制表符、引号或换行时坏掉——上面这份参考实现当初就踩过这个坑。库内容变了要重跑（见第六节的"库变了怎么办"）。
+它零依赖、跨平台，做四件事：递归找 `SKILL.md`、解析 YAML frontmatter、按仓库根算出 `relpath`（不是库根——多一层就全部找不到文件，这个坑它第一版踩过）、用真正的 TSV 转义写出（描述含制表符/引号/换行不会坏列）。`whenToUse` 只在至少一行有时才写第 7 列。
+
+**这次生成之后就不必再手工碰索引了。** 库内容变了重跑一次即可；忘了重跑的话 `doctor` 会告诉你（它会比对"磁盘上有"与"索引里有"，两个方向都报）。
+
+<details>
+<summary>为什么不再推荐"自己写生成器"（原来那段 PowerShell 参考实现）</summary>
+
+原来这里是一段要你复制、自己改 `$root` 的 PowerShell。它能用，但有两个问题：
+
+1. **索引格式是插件的内部数据模型**，不该是安装流程的一部分；
+2. 它**只扫一层**（`$root\<repo>\**`）、**不产出 `whenToUse`**、**漏掉没有 frontmatter 的技能**——写这段时的参考库里有 3 个这样的技能（微软 monorepo 里），于是它们永远搜不到。实测：用 `build-index.mjs` 扫同一个库得到 1028 行，而那份参考实现产出的索引只有 1025 条。
+
+索引仍然是一份**公开契约**：任何能产出那 7 列的东西都可以替代 `build-index.mjs`。契约在第二节上方那张表里。
+</details>
 
 ### 四、验证装好了
 
@@ -362,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -410,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.10.2 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 

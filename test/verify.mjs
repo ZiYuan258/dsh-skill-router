@@ -72,16 +72,32 @@ check('unknown name reports an actionable error', String(miss.skills?.[0]?.error
 const empty = await load.execute({}, exec)
 check('empty call explains how to pass a name', String(empty.note ?? '').includes('Pass name'))
 
-// A cwd that cannot contain a library: the filesystem root. The Windows form is `C:/`
-// rather than a home directory — the point is only "the walk-up reaches the top and finds
-// nothing", and a home path would read like a real machine path in a scanner's report.
-const outside = await search.execute({ query: 'x' }, makeExec(process.platform === 'win32' ? 'C:/' : '/'))
-check('a cwd without a library reports it', String(outside.error ?? '').includes('skill-index.tsv'))
-// The missing-library error must point at something a reader of this repo actually has.
-// It used to name a scanner script that existed only in the author's workspace, so anyone
-// else following the message hit a file that was never there.
-check('the missing-library error points at the README', String(outside.error ?? '').includes('README'))
-check('the missing-library error names no private script', !String(outside.error ?? '').includes('scan-skills'))
+  // A cwd that cannot contain a library: the filesystem root. The Windows form is `C:/`
+  // rather than a home directory — the point is only "the walk-up reaches the top and finds
+  // nothing", and a home path would read like a real machine path in a scanner's report.
+  //
+  // **v1.11.0 改变了这里的期望。** 找不到用户自己的库不再等于"没有库"——插件会回退到随包发布的
+  // 入门技能库，于是"装完就能用"。所以断言从"报错"改成"确实读到了入门库、并且标明了这一点"：
+  // 一个没有库的 cwd 现在必须仍然可用，这正是那一层存在的理由。
+  const outside = await search.execute({ query: 'x' }, makeExec(process.platform === 'win32' ? 'C:/' : '/'))
+  check('a cwd without a user library falls back to the bundled starter library', outside.starterLibrary === true, JSON.stringify(outside.error))
+  check('the fallback names the library it used', String(outside.library ?? '').includes('starter-skills'))
+
+  // 旧分支（连入门库都没有）仍然必须存在，而且仍然必须指向读者手上真有的东西。用一份"拒绝任何
+  // starter-skills 路径"的 fs **重新构建**一套工具来真正触发它——工具绑定的是构建时的 ctx，
+  // 所以不能靠 makeExec 换上下文。光有意图不算，要有一条能跑到的断言。
+  const noBundled = makeFsContext(process.platform === 'win32' ? 'C:/' : '/')
+  const innerStat = noBundled.fs.stat.bind(noBundled.fs)
+  noBundled.fs.stat = async (target) => (String(target.targetKey).includes('starter-skills') ? undefined : innerStat(target))
+  const bareTools = new Map()
+  buildSkillRouterTools(noBundled, (toolName, tool) => bareTools.set(toolName, tool))
+  const bare = await bareTools.get('skill_search').execute({ query: 'x' }, makeExec(process.platform === 'win32' ? 'C:/' : '/'))
+  check('with no library at all it reports the missing index', String(bare.error ?? '').includes('skill-index.tsv'), JSON.stringify(bare.error))
+  // The missing-library error must point at something a reader of this repo actually has.
+  // It used to name a scanner script that existed only in the author's workspace, so anyone
+  // else following the message hit a file that was never there.
+  check('the missing-library error points at the README', String(bare.error ?? '').includes('README'))
+  check('the missing-library error names no private script', !String(bare.error ?? '').includes('scan-skills'))
 
 if (fixture !== undefined) {
   const { dropFixture } = await import('./helpers.mjs')

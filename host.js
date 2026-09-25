@@ -616,6 +616,30 @@ export function buildSkillRouterTools(ctx, register) {
     return { directory, path, missing }
   }
 
+  /**
+   * 与插件一起发布的入门技能库的绝对路径。
+   *
+   * 它让"装完就能用"成立：用户不必先准备自己的库，`skill_search` 就有东西可搜。**它不是常驻技能**——
+   * 它在 `resources/starter-skills/` 下、以 `identifier === 'starter'` 出现在同一个索引契约里，所以
+   * 它走的是 `skill_search` / `skill_load` 这条路，一个字节都不会进 DSH 的常驻目录。把入门技能放进
+   * `.dsh/skills/` 会立刻让它们每轮进上下文，那正好毁掉这个插件的全部意义。
+   *
+   * 只在用户自己的库缺失时才用。`import.meta.url` 在这里可用（本文件以 ESM 加载，已实测），
+   * 而整段都在 try 里：`import.meta` 万一不可用（例如某个宿主把它当经典脚本拼接），回退只是不生效，
+   * 绝不能因此让插件加载失败。
+   */
+  async function bundledLibraryRoot() {
+    try {
+      const here = dirnamePath(fileURLToPath(import.meta.url))
+      const root = joinPath(joinPath(here, 'resources'), 'starter-skills')
+      const target = await ctx.fs.resolve(joinPath(root, 'skill-index.tsv'))
+      const info = await ctx.fs.stat(target)
+      return info !== undefined && info.type === 'file' ? { root, target, version: String(info.version) } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   /** Walk up from the session cwd to the directory holding .skill-src/skill-index.tsv. */
   async function resolveRoot(cwd) {
     let dir = stripTrailingSlashes(String(cwd ?? ''))
@@ -638,14 +662,18 @@ export function buildSkillRouterTools(ctx, register) {
         if (info !== undefined && info.type === 'file') {
           const display = target.displayPath
           const parent = display.slice(0, Math.max(0, display.length - 'skill-index.tsv'.length))
-          return { root: stripTrailingSlashes(parent), indexTarget: target, version: String(info.version) }
+          return { root: stripTrailingSlashes(parent), indexTarget: target, version: String(info.version), bundled: false }
         }
       }
       const cut = Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\'))
       if (cut <= 0) break
       dir = dir.slice(0, cut)
     }
-    return { root: '', indexTarget: undefined, version: '' }
+    // 用户没有自己的库：用随插件发布的入门库。标记 `bundled`，好让工具返回值说清"这些是入门技能、
+    // 不是你自己的库"，否则用户会以为自己的库被读到了。
+    const bundled = await bundledLibraryRoot()
+    if (bundled !== undefined) return { root: bundled.root, indexTarget: bundled.target, version: bundled.version, bundled: true }
+    return { root: '', indexTarget: undefined, version: '', bundled: false }
   }
 
   /** Parse + cache the index; the fs version invalidates the cache when the file changes. */
@@ -655,6 +683,7 @@ export function buildSkillRouterTools(ctx, register) {
       return {
         rows: [],
         root: '',
+        bundled: false,
         error:
           'no .skill-src/skill-index.tsv at or above the session workspace ' +
           (String(cwd) === '' ? '(unknown)' : String(cwd)) +
@@ -672,7 +701,9 @@ export function buildSkillRouterTools(ctx, register) {
       counts.set(key, (counts.get(key) ?? 0) + 1)
     }
     nameCounts = counts
-    const value = { rows, root: located.root, error: '' }
+    // `bundled` 一路带到工具返回值：用户看到的是入门技能时必须说清楚，否则他会以为
+    // 自己的库被读到了（而那时真正的诊断方向完全不同）。
+    const value = { rows, root: located.root, error: '', bundled: located.bundled === true }
     indexCache = { key, value }
     return value
   }
@@ -846,7 +877,7 @@ export function buildSkillRouterTools(ctx, register) {
       const cwd = exec.agent === undefined ? '' : String(exec.agent.session.header.cwd)
       const loaded = await loadIndex(cwd, exec.signal)
       if (loaded.rows.length === 0) {
-        return jsonSafe({ library: loaded.root, total: 0, shown: 0, hits: [], error: loaded.error === '' ? 'the skill index is empty' : loaded.error })
+        return jsonSafe({ library: loaded.root, starterLibrary: loaded.bundled === true ? true : undefined, total: 0, shown: 0, hits: [], error: loaded.error === '' ? 'the skill index is empty' : loaded.error })
       }
       const tokens = tokenize(query)
       if (tokens.length === 0 && repoFilter === '') {
@@ -855,6 +886,7 @@ export function buildSkillRouterTools(ctx, register) {
         // instead of reporting only what went wrong.
         return jsonSafe({
           library: loaded.root,
+          starterLibrary: loaded.bundled === true ? true : undefined,
           total: 0,
           shown: 0,
           hits: [],
@@ -941,6 +973,10 @@ export function buildSkillRouterTools(ctx, register) {
       }
       return jsonSafe({
         library: loaded.root,
+        // 只有当这次真的读的是随插件发布的入门库时才出现。用户必须能分辨"我的库被读到了"和
+        // "这是入门示例"——那两种情况下的诊断方向完全不同。第一版这个标记加在了上面那条
+        // "没有可搜索关键词"的分支上，于是有结果时它反而不出现：分支选错，功能就等于没有。
+        starterLibrary: loaded.bundled === true ? true : undefined,
         query,
         total: scored.length,
         strict,
@@ -1334,9 +1370,9 @@ export function buildSkillRouterTools(ctx, register) {
     const loaded = await loadIndex(cwd, signal)
     // An unloaded index is not "nothing matched" — the dry run has to be able to tell those two
     // apart, or a broken library would look like a well-behaved silent router.
-    if (loaded.root === '') return { candidates: [], tokens: [], tier: 'NONE', reason: 'no-library', indexRows: 0 }
+    if (loaded.root === '') return { candidates: [], tokens: [], tier: 'NONE', reason: 'no-library', indexRows: 0, bundled: false }
     const result = discoverRows(loaded.rows, taskText, DISCOVERY_LIMIT)
-    return { ...result, indexRows: loaded.rows.length }
+    return { ...result, indexRows: loaded.rows.length, bundled: loaded.bundled === true }
   }
 
   return { searchTool, loadTool, refTool, discover }
@@ -1346,6 +1382,8 @@ export function buildSkillRouterTools(ctx, register) {
 // imports node:fs and node:path only, and this entry imports it relatively. Keeping the
 // integration column (reading a task, writing a line) in its own module is what lets the ranking
 // stay pure and testable without a host.
+import { dirname as dirnamePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder } from './discovery.js'
 
 /**
