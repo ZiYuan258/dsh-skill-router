@@ -491,7 +491,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-二十四个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+二十八个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -511,6 +511,10 @@ npm test
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
 | `discovery-dry-run.mjs` | 发现层的干跑，**真的调用 `apply(ctx)` 并像 agent-loop 一样触发 `agent/pre-step`**：注册三个工具与监听、**不改变决策**、写出遥测、只在第一步记录、中文任务记 `no-searchable-token`、`reject` 原样返回，以及**遥测里没有用户原文** |
+| `build-index.mjs` | 索引生成器：**每一行都按插件的路径规则解析到真实存在的 `SKILL.md`**（第一版 `relpath` 多套了一层 `repo/`，行数 1028 = 1028 却 0 行可解析——计数检查抓不到这种错）、`.git`/`node_modules` 被跳过、BOM/CRLF/块标量/缺 name/缺 description 各形状、制表符与引号的 TSV 转义、`whenToUse` 只在需要时写第 7 列、CLI 的 `--check` 三态与 CRLF 不算过期；有真库时逐行复核并与现有索引比键集合 |
+| `doctor.mjs` | 库体检的**每条断言都构造一种真实故障**并要求它被报出来（索引不存在 / 过期 / 缺失 / 无 description / 跨仓库重名），因为一个永远返回"健康"的体检工具也能通过"健康库返回 OK"那种测试；`--json` 可解析且不含整库明细 |
+| `library-root-contract.mjs` | **跨层契约**：同一份夹具同时驱动运行时（`host.js`）与 `doctor.mjs`，断言两者从同一个嵌套 cwd 得到**同一个库根**；并覆盖两个分叉点（超过 8 层两者都不该找到；空工作区只有运行时回退入门库） |
+| `starter-library.mjs` | 入门技能库：索引与磁盘一致、`files` 含 `resources`、空工作区里能搜到并加载入门技能且标 `starterLibrary: true`、有自己的库时该标记消失、**插件没有任何"往常驻目录注册技能"的调用**（产品不变量） |
 | `usage-ledger.mjs` | 技能账本的纯逻辑（59 条断言），夹具照抄实测事件形状：三种加载工具都算、`skill_search` 不算、同一条事件跨页只计一次、**不同事件共用同一 `callId` 仍计两次**、一次调用带 `A+B` 两个名字都保留、路径与裸名归并为同一技能、`hasMore` 三态、**窗口挤出后已读到的记录不丢**、**按 `seq` 排成会话顺序**、**行数与调用数的关系在结构上成立**（`calls ≤ rows`，取等当且仅当没有多名调用）、坏输入返回空账本而不抛 |
 | `usage-tab.mjs` | 标签页接线（87 条断言），通过**浏览器装载它的同一条路径**取组件再渲染：注册契约、`inject` 两个参数、三种"读不到账本"的说明、首屏即读且每页只拉一次、`hasMore` 永为真时在上限内停住、第 5 页深埋的调用被找到、200 片流式碎片只排一次渲染、**窗口挤掉最老一条后它仍在清单里**、**父组件重渲染不得让翻页卡死**、**「读取中」必须有截止时间**、**「行数 ≠ 调用数」必须自我解释**、界面只留结论不留开发用诊断 |
 | `client-half.mjs` | 按**真实加载机制**验证客户端半：插桩 `window.__ModuleLoader__`、像 `create()` 一样物化 factory、断言 `inject` 声明、在四种 document 时序下 `apply()` 都不抛错；并**扫描并拒绝**已证伪的数据契约回来（`legacy.nodes`、`useChat`、把工具声明当用量、**对着 `source.loadOlder` 而不是 `session.loadOlder` 写翻页**） |
@@ -533,7 +537,7 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         二十四个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         二十八个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
