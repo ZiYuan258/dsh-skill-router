@@ -77,6 +77,31 @@ function checkPair(label, defaultFile, alternateFile, facts) {
   console.log(`  ${label}: ${ha.length} headings, ${fences(a) / 2} fenced blocks, ${tableRows(a)} table rows`)
 }
 
+// ── 开头的身份与消歧必须留在开头 ─────────────────────────────────────────────────
+//
+// 这条检查守的是**位置**，不是内容。`dsh-skill-router` 这个名字下有 8 个 GitHub 仓库，其中若干
+// 走"自动路由 + 自动注入"的相反路线（`lau4tin1/dsh-skill-router` 还占着 npm 裸名）。读者搜到本
+// 仓库时只有几秒钟判断这是不是他要的那个，所以两件事必须出现在**第一个二级标题之前**：
+//
+//   1. owner 是 ZiYuan258（否则装到的是另一个插件）；
+//   2. 本插件不做自动注入，加载由 agent 决定。
+//
+// 写在文档深处等于没写——README 里原本就有一节同名对照表，但在一百多行之后。位置本身会漂移，
+// 靠人眼守不住，所以让它变成一条会红的断言。
+console.log('README opening:')
+for (const [file, ownerNeedle, stancePattern] of [
+  ['README.md', 'github:ZiYuan258/dsh-skill-router', /不做自动注入|自动注入.*有意/],
+  ['README.en.md', 'github:ZiYuan258/dsh-skill-router', /does not auto-inject/i],
+]) {
+  const text = read(file)
+  const firstHeading = text.split('\n').findIndex((line) => /^##\s/.test(line))
+  const opening = firstHeading < 0 ? text : text.split('\n').slice(0, firstHeading).join('\n')
+  const lines = opening.split('\n').length
+  if (opening.includes(ownerNeedle) === false) problems.push(`${file}: the opening does not carry the owner-qualified install command (first ${lines} lines)`)
+  if (stancePattern.test(opening) === false) problems.push(`${file}: the opening does not state that this plugin does not auto-inject (first ${lines} lines)`)
+  console.log(`  ${file}: opening is ${lines} lines, owner=${opening.includes(ownerNeedle)}, stance=${stancePattern.test(opening)}`)
+}
+
 console.log('bilingual pairs:')
 checkPair('README', 'README.md', 'README.en.md', [
   'skill_search',

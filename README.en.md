@@ -2,7 +2,17 @@
 
 English | [中文](README.md)
 
-A **Host plugin** for DeepSeek Harness. It adds three tools — `skill_search`, `skill_load`, `skill_ref` — so an agent can find and load a skill from a library on demand.
+**Agent-driven skill discovery and on-demand loading.** A **Host plugin** for DeepSeek Harness. It adds three tools — `skill_search`, `skill_load`, `skill_ref` — so an agent can find and load a skill from a library on demand.
+
+```sh
+dsh plugin --profile web add github:ZiYuan258/dsh-skill-router
+```
+
+> **Two things to check before installing.**
+>
+> **1. The owner has to be `ZiYuan258`.** Eight repositories on GitHub share this name (this one is the newest, created 2026-09-23). Several of them **auto-inject**: they read the user's message before the model answers and put a skill's full body straight into the prompt.
+>
+> **2. This plugin does not auto-inject, deliberately.** It puts candidates in front of the agent and **lets the agent decide what to load**, including nothing at all. A comparison table of the same-named repositories is further down.
 
 > **Only a dozen or two skills? This plugin is not for you.**
 > A single task usually uses just a few skills, so **when the set is small, keeping them resident is cheaper** — the catalog is DSH's native mechanism and it works. This plugin addresses the other situation: **more skills than will fit in the catalog.**
@@ -145,16 +155,19 @@ dsh plugin --profile <profile> remove dsh-skill-router
 
 ### ⚠️ Check the name first: several repositories share it
 
-At least eight repositories are called `dsh-skill-router`, so installing the wrong one gets you a different plugin:
+**Eight** repositories on GitHub are called `dsh-skill-router` (this one is the newest, created 2026-09-23), so installing the wrong one gets you a different plugin:
 
-| | This repository | The other family (e.g. `MJorgin/dsh-skill-router`) |
+| | This repository | The other family |
 |---|---|---|
-| Install command | `github:ZiYuan258/dsh-skill-router` | `github:akqwpeter-prog/dsh-skill-router` (that repo was renamed; the command is stale) |
-| Mechanism | **tool-driven**: the model calls `skill_search` / `skill_load` / `skill_ref` | **pre-step routing**: reads each user message and pours matched skills in |
+| Install command | `github:ZiYuan258/dsh-skill-router` | `github:lau4tin1/dsh-skill-router` (holds the bare npm name `dsh-skill-router`) |
+| Mechanism | **tool-driven**: the model calls `skill_search` / `skill_load` / `skill_ref` itself | **routing plus auto-injection**: embeds tasks and skills with a local model, keeps the clearly-relevant ones by a gap rule, and puts their bodies in the prompt |
 | Problem it solves | library skills are **invisible to the model** | the model **does not use a skill it should have** |
-| Dependencies | zero dependencies, zero imports | varies; some need an LLM judge or embeddings |
+| Who chooses | **the agent** — it reads the candidates and may pick none | **the plugin** — a routing hit is injected |
+| Dependencies | zero dependencies, zero imports | varies; some need a local model or embeddings |
 
-The two are **not competitors and can be stacked** — they work at different layers. Check that the owner is `ZiYuan258` before installing.
+**The two take opposite positions, and that is this plugin's deliberate design rather than a gap.** See the task-aware discovery section below: that layer only discovers, and currently only measures rather than injecting.
+
+Others in the family include `MJorgin/dsh-skill-router` (rule-first pre-step routing) and `Phantomcyber-ai/dsh-skill-router` (intent-level auto-routing); some are placeholders or unfinished. **Check that the owner is `ZiYuan258` before installing.**
 
 > If a tool reports this repository as unreachable, check which kind of failure it is: GitHub rate-limits
 > **unauthenticated API** calls to 60/hour and answers `403 API rate limit exceeded`, while the web page and raw

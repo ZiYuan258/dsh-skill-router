@@ -2,7 +2,17 @@
 
 [English](README.en.md) | 中文
 
-给 DeepSeek Harness 的 **Host 插件**。新增 `skill_search` / `skill_load` / `skill_ref` 三个工具，让 agent 在需要时自己去技能库里检索并加载技能。
+**Agent 驱动的技能发现与按需加载。** 给 DeepSeek Harness 的 Host 插件：新增 `skill_search` / `skill_load` / `skill_ref` 三个工具，让 agent 在需要时自己去技能库里检索并加载技能。
+
+```sh
+dsh plugin --profile web add github:ZiYuan258/dsh-skill-router
+```
+
+> **装之前认准两件事。**
+>
+> **一、owner 必须是 `ZiYuan258`。** 这个名字下并存 **8 个** GitHub 仓库（我是其中最新的一个）。其中若干走**自动注入**路线：在模型回答前读用户消息，命中就把技能正文塞进提示词。
+>
+> **二、本插件不做自动注入——这是有意的。** 它把候选摆出来，**加载哪个由 agent 自己决定**；`README` 底部有一张同名仓库的对照表。
 
 > **你只有十几个技能？这个插件不适合你。**
 > 一次工作通常只用到几个技能，所以**技能少的时候，让它们常驻目录反而更省**——目录本来就是 DSH 的原生机制。
@@ -145,16 +155,19 @@ dsh plugin --profile <profile> remove dsh-skill-router
 
 ### ⚠️ 名字先认准：`dsh-skill-router` 有多个同名仓库
 
-这个名字下至少并存 8 个仓库，**装错就是装了另一个插件**：
+GitHub 上这个名字下并存 **8 个**仓库（本仓库是其中最新的一个，创建于 2026-09-23），**装错就是装了另一个插件**：
 
-| | 本仓库 | 另一类同名插件（例：`MJorgin/dsh-skill-router`） |
+| | 本仓库 | 另一类同名插件 |
 |---|---|---|
-| 安装命令 | `github:ZiYuan258/dsh-skill-router` | `github:akqwpeter-prog/dsh-skill-router`（该仓库已改名，命令是过期的） |
-| 机制 | **工具驱动**：模型自己调 `skill_search` / `skill_load` / `skill_ref` | **pre-step 自动路由**：模型回答前读用户消息，命中即注入全文 |
-| 解决的问题 | 库里的技能**对模型不可见** | 模型**该用技能时没用**（注意力漏掉） |
-| 依赖 | 零依赖、零导入 | 各自不同，有的需要 LLM 判定或 embedding |
+| 安装命令 | `github:ZiYuan258/dsh-skill-router` | `github:lau4tin1/dsh-skill-router`（占着 npm 裸名 `dsh-skill-router`） |
+| 机制 | **工具驱动**：模型自己调 `skill_search` / `skill_load` / `skill_ref` | **自动路由 + 自动注入**：回答前用本地模型给任务与技能做向量，按分差挑出相关的，把全文塞进提示词 |
+| 要解决的问题 | 库里的技能**对模型不可见** | 模型**该用技能时没用**（注意力漏掉） |
+| 谁决定用哪个 | **agent**：它看完候选自己选，可以一个都不选 | **插件**：路由命中即注入 |
+| 依赖 | 零依赖、零导入 | 各自不同，有的需要本地模型或 embedding |
 
-两者**不冲突、可叠加**——它们在不同层次工作。装之前核对 owner 是 `ZiYuan258`。
+**两者立场相反，这是本插件有意的设计，不是缺陷。** 见下方「任务感知的技能发现」一节：那一层只做发现，且当前只测量不注入。
+
+同类里还有 `MJorgin/dsh-skill-router`（rule-first pre-step 路由）、`Phantomcyber-ai/dsh-skill-router`（intent-level 自动路由）等；也有若干只是占名或未完成的仓库。**装之前核对 owner 是 `ZiYuan258`。**
 
 > 若你的工具报告本仓库"不可访问"，先分清是哪种：GitHub 对**未认证 API** 限流 60 次/小时，
 > 超限返回 `403 API rate limit exceeded`，而网页与 raw 文件仍然正常——`dsh plugin add` 走的正是后者。
