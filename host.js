@@ -640,7 +640,14 @@ export function buildSkillRouterTools(ctx, register) {
     }
   }
 
-  /** Walk up from the session cwd to the directory holding .skill-src/skill-index.tsv. */
+  /**
+   * 从会话 cwd 向上找到含 `.skill-src/skill-index.tsv` 的目录；找不到才回退到入门库。
+   *
+   * **这条"向上最多 8 层"的规则被 `tools/doctor.mjs` 的 `findLibraryRoot` 镜像着。** 改这里就要
+   * 同步改那里：两者一旦不一致，就会出现"运行时找到了库并正常工作、doctor 说找不到"的分叉，而
+   * **一个诊断工具报出与运行时相反的结论，比没有诊断更糟**——用户会去查一个不存在的问题。
+   * `test/library-root-contract.mjs` 同时驱动两个实现来钉住这条契约。
+   */
   async function resolveRoot(cwd) {
     let dir = stripTrailingSlashes(String(cwd ?? ''))
     // Eight levels is a floor, not a recommendation: the library is normally at the

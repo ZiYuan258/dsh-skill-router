@@ -100,6 +100,9 @@ ok('空行被忽略', parseIndexRows('r\tskills/a\ta\td\n\n\n').length === 1)
 
 // ── 8) 库根查找 ────────────────────────────────────────────────────────────────
 ok('--root 指定的库优先', findLibraryRoot(root) === root)
+// 嵌套 cwd 的向上查找、以及"运行时与 doctor 必须得到同一个库"的跨层对齐，在
+// test/library-root-contract.mjs 里——那个文件同时驱动两个实现，是这条契约的归属地。
+// 上面那两条局部断言（--root 优先 / 找不到返回 undefined）留在这里。
 ok('找不到时返回 undefined 而不是抛异常', findLibraryRoot(join(root, 'nope')) === undefined)
 ok('库不存在时退出码为 2', main(['--root', join(root, 'nope')], QUIET) === 2)
 ok('--root 缺参数时退出码为 2', main(['--root', '--json'], QUIET) === 2)

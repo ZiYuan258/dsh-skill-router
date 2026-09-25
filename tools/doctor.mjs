@@ -68,15 +68,44 @@ function splitFields(line) {
   return fields
 }
 
-/** 找一个库根：显式 --root > $DSH_HOME/.skill-src > 主目录/.skill-src > 当前目录下。 */
-export function findLibraryRoot(explicit) {
+/**
+ * 找一个库根，**按与运行时相同的规则**。
+ *
+ * 运行时（`host.js` 的 `resolveRoot`）的顺序是：
+ *
+ *   1. 从会话 cwd **向上最多 8 层**找 `.skill-src/skill-index.tsv`
+ *   2. 找不到就用随包发布的入门库
+ *
+ * 这个函数必须复现第 1 条。第一版只查了 `--root` / `$DSH_HOME` / 主目录 / **当前**目录，没有向上走，
+ * 于是出现过分叉：会话开在 `<工作区>/projects/a/b/c` 时，运行时向上找到 `<工作区>/.skill-src` 并正常
+ * 工作，而 doctor 说"找不到技能库"。**一个诊断工具报出与运行时相反的结论，比没有诊断更糟**——用户会
+ * 去查一个不存在的问题。已用夹具钉住（`test/doctor.mjs` 的"嵌套 cwd"那条）。
+ *
+ * 与运行时只有一处不同，而且是有意的：**不做入门库回退**。doctor 诊断的是用户自己的库；用户没有库时
+ * 正确的输出是"没找到 + 怎么建"，而不是去体检插件自带的那 5 个示例。
+ *
+ * @param explicit - `--root` 的值；给了就以它为准。
+ * @param from - 从哪里开始向上走；默认 `process.cwd()`。可注入是为了能测，不用去改全局状态。
+ * @returns 库根目录，或 `undefined`。
+ */
+export function findLibraryRoot(explicit, from) {
+  if (explicit !== undefined && explicit !== '') {
+    const root = resolve(explicit)
+    return existsSync(join(root, 'skill-index.tsv')) ? root : undefined
+  }
   const candidates = []
-  if (explicit !== undefined && explicit !== '') candidates.push(resolve(explicit))
   const home = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : undefined
   const userHome = process.env.USERPROFILE !== undefined && process.env.USERPROFILE !== '' ? process.env.USERPROFILE : process.env.HOME
   if (home !== undefined) candidates.push(join(home, '.skill-src'))
   if (userHome !== undefined && userHome !== '') candidates.push(join(userHome, '.skill-src'))
-  candidates.push(join(process.cwd(), '.skill-src'))
+  // 从 cwd 向上 8 层，与运行时同一个数字。
+  let dir = resolve(from === undefined || from === '' ? process.cwd() : from)
+  for (let i = 0; i < 9 && dir !== ''; i += 1) {
+    candidates.push(join(dir, '.skill-src'))
+    const parent = resolve(dir, '..')
+    if (parent === dir) break
+    dir = parent
+  }
   for (const candidate of candidates) {
     if (existsSync(join(candidate, 'skill-index.tsv'))) return candidate
   }
