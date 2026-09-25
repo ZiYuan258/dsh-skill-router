@@ -71,6 +71,25 @@ alert #3  host.js:611  String(cwd).replace(/[\\/]+$/, '')  ← 同一个正则�
 
 已按 git 历史重建（不是手工重写），并补上一条真能拦住它的检查：**同一个 L2 标题在文档里出现两次就报错**。我注入重复验证过它会红。
 
+## 附记：这个护栏自己又引了一条告警，而且修法不同
+
+`#3` 关掉之后，CodeQL 立刻报了 **`#4`（`js/redos`）指向 `test/redos-guard.mjs:99`**——也就是上面那个"扫形状"的护栏本身：
+
+```js
+return /\/(?:[^/\n]|\\.)*[+*]\$/.test(line)    // ← (a|b)* 形状
+```
+
+**它在用正要扫的那个形状去扫那个形状。** 而且这次的规则类型是 `js/redos` 而不是 `js/polynomial-redos`：后者可以靠"输入有界"论证掉，前者不行——所以正确做法不是再写一段论证，而是**把这个形状彻底去掉**：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| 数 `host.js` 里的"量词 + `$`" | `/\/(?:[^/\n]|\\.)*[+*]\$/` | 逐字符小状态机（`looksLikeTailQuantifierRegex`） |
+| 比对基准（"正则会做什么"） | `c.replace(/[\\/]+$/, '')` | 显式循环 `asRegexWould()` |
+
+第二个改动还顺带修掉一个方法论问题：**拿被测对象当基准不算验证**。现在基准与实现是两套独立写法，一致才有意义。
+
+这一处**没有再发一版**：它只改测试，不改插件行为（按 `RELEASING.md` 的版本策略，工具/文档/测试直接进 `main`）。这也是那条策略第一次真的派上用场——前几轮我为工具改动发了 v1.10.1 和 v1.10.2，这次停下来是对的。
+
 ## English
 
 CodeQL flagged `js/polynomial-redos` again (`high`): alert **#3**, `host.js:611`. It was the **third appearance of the same regex** — the previous round fixed the line the alert pointed at and left four more.
@@ -82,5 +101,9 @@ CodeQL flagged `js/polynomial-redos` again (`high`): alert **#3**, `host.js:611`
 **One failed attempt worth recording.** I wrote a shape scanner for "class + quantifier + `$`" and went through **five criteria, every one of which misjudged a genuinely dangerous pattern as safe** (or the reverse). Measurement replaced derivation: any "X + quantifier + `$`" degrades to quadratic behaviour as long as a long run consists of characters X accepts and the tail does not — `/[a-z]+$/` costs 2,577 ms and `/x*$/` costs 2,855 ms at 64,000 characters, neither of which my criteria flagged. Shape matching is therefore meaningless here; what can be checked is that **the shape only ever sees bounded input**, and that is an argument rather than a regex.
 
 So `test/redos-guard.mjs` asserts only reliable facts: the replacement is equivalent to the regex case by case (20 cases, backslashes included), worst-case input stays constant-time, the call sites really use the function, and **`host.js` may contain exactly one "quantifier + `$`" regex** — each additional one requires someone to redo the boundedness argument. Counting is reliable; shape judgement is not.
+
+**Addendum: the guard then raised an alert of its own, and it needed a different fix.** As soon as `#3` closed, CodeQL reported **`#4` (`js/redos`) at `test/redos-guard.mjs:99`** — the shape scanner above, whose own pattern was `/\/(?:[^/\n]|\\.)*[+*]\$/`, an `(a|b)*` shape: **it was scanning for the very shape it was made of.** This time the rule is `js/redos`, not `js/polynomial-redos`, and a bounded-input argument does not retire it — so the answer was not another argument but removing the shape entirely: the counting check became a small character-by-character state machine, and the equivalence baseline became an explicit loop instead of `c.replace(/[\\/]+$/, '')`. That second change fixed a methodology problem too — **using the subject as its own baseline is not verification**; the baseline and the implementation are now two independent implementations, and agreeing means something.
+
+**No new release for that**: it changes only tests, not plugin behaviour, which is exactly what the versioning policy in `RELEASING.md` says goes straight to `main`. It is the first time that policy actually stopped a release — the preceding rounds had me cutting v1.10.1 and v1.10.2 for tooling changes.
 
 **Also: the English README had been broken for two releases.** Chasing the table-row mismatch that `docs-parity` reported (88 vs 87, when the pair must agree) showed that v1.10.0 **truncated** it — the Tests table cut off mid-row and Layout/Security/License vanished — and v1.10.1 then **duplicated** everything from line 10 to the end, leaving half of a 1,006-line file redundant. None of the three structural checks fired, because the two files legitimately differ in size, so a duplicate still "looks normal" by count. A reader would notice they had looped back to the top; a test did not. It is rebuilt from git history rather than rewritten by hand, and there is now a check that a section heading appearing twice is an error — verified by injecting a duplicate and watching it go red.

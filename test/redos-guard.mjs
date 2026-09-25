@@ -53,7 +53,20 @@ const cases = [
   '/', BS, '//', BS + BS, '', 'a///b', 'a/b' + BS + BS, drive('D'), drive('D') + '/', 'D:',
   'a/b' + BS + '/' + BS, '/skill-index.tsv', drive('C') + 'Users' + BS + 'x' + BS + '.skill-src' + BS,
 ]
-const mismatched = cases.filter((c) => c.replace(/[\\/]+$/, '') !== stripTrailingSlashes(c))
+/**
+ * 比对基准：把"正则会做什么"逐字符写出来，而**不是**调用那个正则。
+ *
+ * 用正则当基准有两重问题：它正是被判定为 `js/polynomial-redos` 的那个形状（留在测试文件里会
+ * 再引一条告警，alert #4 已经这么来过一次），而且拿被测对象当标准本身就不算验证。写成循环还有
+ * 一个好处：基准与实现是**两套独立写法**，一致才有意义。
+ */
+function asRegexWould(text) {
+  let end = text.length
+  while (end > 0 && (text[end - 1] === '/' || text[end - 1] === BS)) end -= 1
+  return text.slice(0, end)
+}
+
+const mismatched = cases.filter((c) => asRegexWould(c) !== stripTrailingSlashes(c))
 ok('与正则逐例等价（' + cases.length + ' 例，含反斜杠结尾）', mismatched.length === 0, mismatched.map((c) => JSON.stringify(c)).join(', '))
 
 // ── 2) 最坏输入下没有二次增长 ──────────────────────────────────────────────────
@@ -92,13 +105,27 @@ for (const site of bounded) {
 //
 // 这是这个文件最有用的一条：生产文件里每多一个这样的正则，就必须有人来做一次"输入是否有界"的
 // 论证。计数是可靠的，形状判断不是。
-const countTail = (source) => source.split('\n').filter((line) => {
-  const trimmed = line.trim()
-  if (trimmed.startsWith('*') || trimmed.startsWith('//')) return false
-  // 正则字面量里出现 `+$` 或 `*$`（转义写法也算）
-  return /\/(?:[^/\n]|\\.)*[+*]\$/.test(line)
-}).length
-const tailCount = countTail(hostSource)
+//
+// 检测**用循环写，不用正则**。第一版这里写的是 `/\/(?:[^/\n]|\\.)*[+*]\$/` —— 那正是
+// `(a|b)*` 形状，也就是这个文件在扫的东西：CodeQL 随即报了 `js/redos`（alert #4）指向这一行。
+// "用同一个形状去检测这个形状"本身就是缺陷，所以它被换成了一个逐字符的小状态机。
+//
+// 只认最直白的那种：行内出现 `/`、其后不远处的 `+` 或 `*` 紧跟 `$`，且中间不是 `//` 注释。
+// 宁可漏报（漏了由 code review 兜）也不要再引入一个自己的回溯风险。
+function looksLikeTailQuantifierRegex(line) {
+  const code = line.trim()
+  if (code.startsWith('*') || code.startsWith('//')) return false
+  const slash = code.indexOf('/')
+  if (slash < 0) return false
+  for (let i = slash + 1; i + 1 < code.length; i += 1) {
+    const ch = code[i]
+    if (ch === '\n') break
+    if ((ch === '+' || ch === '*') && code[i + 1] === '$') return true
+  }
+  return false
+}
+
+const tailCount = hostSource.split('\n').filter(looksLikeTailQuantifierRegex).length
 ok('host.js 里"量词 + $"正则的条数为 1（' + tailCount + '）', tailCount === 1, '每多一条都需要一次"输入是否有界"的论证')
 
 console.log(problems.length === 0 ? '\n回溯护栏: OK' : '\n回溯护栏 FAILED:\n  ' + problems.join('\n  '))
