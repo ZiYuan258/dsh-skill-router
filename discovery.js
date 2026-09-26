@@ -68,7 +68,7 @@ export function makeDiscoveryRecorder(path, maxBytes) {
  * Kept a pure function so the shape can be pinned by a test: the guarantee that no user text
  * reaches the file is a property of this function, and a guarantee nothing checks is a comment.
  *
- * @param input - `{ turn, step, result, elapsedMs, indexRows, injected }`.
+ * @param input - `{ turn, step, result, elapsedMs, indexRows, injected, hintBytes }`.
  * @returns a flat, JSON-safe record with no free-form user content.
  */
 export function discoveryRecord(input) {
@@ -95,5 +95,46 @@ export function discoveryRecord(input) {
       fields: Array.isArray(c.fields) ? c.fields.slice() : [],
     })),
     injected: source.injected === true,
+    // How many bytes the hint actually added to this turn's context. Recorded rather than
+    // assumed: the whole case for injecting rests on this number being small, and an estimate
+    // in a design note is not evidence. 0 when nothing was injected.
+    hintBytes: typeof source.hintBytes === 'number' && source.hintBytes > 0 ? Math.round(source.hintBytes) : 0,
+  }
+}
+
+/**
+ * Build the record written when a turn's tool calls are counted.
+ *
+ * **Why this is a separate record, and why it is written at the END of a turn.** The discovery
+ * record above is written at `step === 1`, which is *before* the model has done anything — at that
+ * moment nobody can know whether this turn will end up calling `skill_search`. Asking the trigger
+ * question ("did the hint make the agent search?") therefore needs a second observation taken
+ * after the turn is over, joined to the first by `turn`.
+ *
+ * Only counts. No tool arguments, no skill bodies, no user text — the question is whether the
+ * agent searched and loaded, not what it said.
+ *
+ * @param input - `{ turn, tier, injected, calls }`.
+ * @returns a flat, JSON-safe record.
+ */
+export function turnCallsRecord(input) {
+  const source = input === null || input === undefined ? {} : input
+  const calls = source.calls === null || source.calls === undefined ? {} : source.calls
+  const count = (value) => (typeof value === 'number' && value > 0 ? Math.round(value) : 0)
+  return {
+    at: new Date().toISOString(),
+    kind: 'turn-calls',
+    turn: typeof source.turn === 'number' ? source.turn : null,
+    // Copied in so a reader can join this to the discovery record without a second pass, and so
+    // the A/B comparison (injected vs not) works on one line.
+    tier: typeof source.tier === 'string' ? source.tier : null,
+    injected: source.injected === true,
+    skillSearchCalls: count(calls.skill_search),
+    skillLoadCalls: count(calls.skill_load),
+    skillRefCalls: count(calls.skill_ref),
+    // The native DSH `skill` tool, i.e. the resident catalog. Counted separately because it is a
+    // different question: "did the agent use a resident skill" is not "did it use the library".
+    residentSkillCalls: count(calls.skill),
+    otherToolCalls: count(source.otherToolCalls),
   }
 }

@@ -1389,9 +1389,10 @@ export function buildSkillRouterTools(ctx, register) {
 // imports node:fs and node:path only, and this entry imports it relatively. Keeping the
 // integration column (reading a task, writing a line) in its own module is what lets the ranking
 // stay pure and testable without a host.
+import { randomUUID } from 'node:crypto'
 import { dirname as dirnamePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder } from './discovery.js'
+import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder, turnCallsRecord } from './discovery.js'
 
 /**
  * Durable DSH plugin entry: registers all three tools on the global tool registry.
@@ -1438,20 +1439,41 @@ function discoveryHint(result) {
   )
 }
 
+/**
+ * Wrap the hint as a user-role message for `decision.messages`.
+ *
+ * The shape is copied from what the framework's own `createUserMessage` produces rather than
+ * guessed: `{ role, content, source, id }`, where `content` is an array of `{ type, text }` blocks,
+ * `source` is an open `{ kind }` tag (the official hooks plugin uses its own name there; kinds are
+ * not an enum) and `id` is a fresh UUID. `createUserMessage` additionally deep-freezes the message;
+ * this one is not frozen, and nothing downstream requires that — an immutable clone would cost a
+ * `structuredClone` per turn for no behavioural difference.
+ *
+ * **The id is not decoration.** Framework messages always carry one, and two injected messages
+ * sharing an id would be indistinguishable to anything that keys on it — so it is random per call
+ * and there is an assertion for it in the tests.
+ */
+function contextMessage(text) {
+  return {
+    id: randomUUID(),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'skill-router' },
+  }
+}
+
 export function apply(ctx) {
   const router = buildSkillRouterTools(ctx, (toolName, tool) => {
     ctx.effect(() => ctx.tools.register(tool), 'skill-router: ' + toolName)
   })
 
-  // ── dry run: measure, do not act ────────────────────────────────────────────────────────
+  // ── discovery: measure, and inject only what has earned it ──────────────────────────────
   //
-  // At the first step of a turn the library is ranked for the incoming task, and ONLY the
-  // outcome is recorded. `agent/pre-step` is the right seam because it runs before the request
-  // is built — but it is also the seam where acting would change every turn's context, so the
-  // first version of this deliberately writes a JSONL line and returns the decision untouched.
+  // At the first step of a turn the library is ranked for the incoming task, and HIGH-tier
+  // candidates are put in front of the model. `agent/pre-step` is the right seam because it runs
+  // before the request is built and its `enter.messages` is the authoritative batch for the step.
   //
-  // Two facts about the seam that the eventual injection must respect, both verified in the
-  // harness rather than assumed:
+  // Two facts about the seam, both verified in the harness rather than assumed:
   //   * `step` must be 1. The waterfall runs per step, and the messages it replaces are that
   //     step's claimed batch, so hinting on every step would repeat the hint for one task.
   //   * `agent.inject()` is NOT the way to make the hint visible to the current step:
@@ -1459,19 +1481,75 @@ export function apply(ctx) {
   //     lands in `next-step` and is only claimed at the NEXT step. The current step sees exactly
   //     `decision.messages` — so the hint belongs in that array, which is also what becomes the
   //     session's `user/message` for the first attempt.
+  //
+  // ── why HIGH only, and why this is an experiment rather than the design ──────────────────
+  //
+  // Measured before this shipped: across 273 turns the library was searched essentially never and
+  // every record said `injected: false`. The hypothesis under test is narrow and causal — **the
+  // agent does not fail to use skills, it is never told which ones are worth considering** — and
+  // testing it needs one changed variable. So HIGH only (`nameHits > 0`, at least two tokens
+  // landed), and nothing about retrieval changed in this version: the strict-AND policy, the
+  // tokenizer and the tier thresholds are all exactly as they were, so a change in behaviour can
+  // be attributed to the hint rather than to a second edit.
+  //
+  // The cost is why it is worth trying at all: the resident catalog costs ~3,238 tokens per turn
+  // and the three tool schemas ~1,001, while a five-name hint measures ~57.
+  const INJECT_TIERS = new Set(['HIGH'])
   const discoveryLog = process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG
   const recorder = makeDiscoveryRecorder(discoveryLog === undefined ? defaultDiscoveryLogPath() : discoveryLog, undefined)
   if (recorder.path !== undefined) {
+    /**
+     * Per-turn tool-call counters.
+     *
+     * The question this answers cannot be asked at `step === 1`: at that moment nobody knows
+     * whether the turn will end up calling `skill_search`. So calls are accumulated from the
+     * session event stream and flushed when the turn is over.
+     *
+     * "Over" is observed at the **next** turn's first step, because this harness declares
+     * `turn/start` and `turn/end` but exposes no turn-stopping waterfall a plugin can hook —
+     * verified: `agent/turn-stopping` does not exist anywhere in 0.1.7-rc.2, so hooking it would
+     * have been instrumentation that silently never ran. A turn whose calls are never flushed is
+     * one abandoned mid-flight (abort, crash, session close); its numbers are lost rather than
+     * misattributed, which is the right failure direction for a measurement.
+     */
+    const countedTools = new Set(['skill_search', 'skill_load', 'skill_ref', 'skill'])
+    let current = null
+
+    const flush = () => {
+      if (current === null) return
+      const done = current
+      current = null
+      try {
+        recorder.write(turnCallsRecord({ turn: done.turn, tier: done.tier, injected: done.injected, calls: done.calls, otherToolCalls: done.other }))
+      } catch {
+        /* telemetry is never worth a failed turn */
+      }
+    }
+
+    ctx.on('session/event', (session, event) => {
+      if (current === null || event === null || typeof event !== 'object') return
+      if (event.type !== 'tool/call') return
+      const name = event.data === null || typeof event.data !== 'object' ? '' : String(event.data.name ?? '')
+      if (name === '') return
+      if (countedTools.has(name)) current.calls[name] = (current.calls[name] ?? 0) + 1
+      else current.other += 1
+    })
+
     ctx.on('agent/pre-step', async ({ agent, messages, turn, step, signal }, next) => {
       const decision = await next()
       if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
       if (step !== 1) return decision
+      // A new turn starting means the previous one is over: flush it before measuring this one.
+      flush()
       const taskText = taskTextOf(messages).trim()
       if (taskText === '') return decision
       try {
         const started = Date.now()
         const cwd = agent === undefined || agent === null ? '' : String(agent.session.header.cwd ?? '')
         const result = await router.discover(taskText, cwd, signal)
+        const inject = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
+        const hint = inject ? discoveryHint(result) : ''
+        current = { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, calls: {}, other: 0 }
         recorder.write(
           discoveryRecord({
             turn,
@@ -1479,19 +1557,21 @@ export function apply(ctx) {
             result,
             elapsedMs: Date.now() - started,
             indexRows: result.indexRows,
-            // Not available yet, and recorded as false so a later reading of the log can tell
-            // the measured period from the injected one.
-            injected: false,
+            injected: inject,
+            // Measured, not estimated: the case for injecting rests on this number being small.
+            hintBytes: Buffer.byteLength(hint, 'utf8'),
           }),
         )
+        // Appended to this step's claimed batch — not injected into the inbox.
+        return inject ? { ...decision, messages: [...decision.messages, contextMessage(hint)] } : decision
       } catch (error) {
-        // Telemetry is never worth a failed turn — but a silent catch is how a dry run produces
+        // Telemetry is never worth a failed turn — but a silent catch is how a run produces
         // "three days, no data" and nothing to look at. Keep the failure observable in-process
         // (tests read this) without writing anything to the user's session.
         const sink = globalThis.__dshSkillRouterDiscoveryErrors
         if (Array.isArray(sink)) sink.push(String(error && error.message ? error.message : error))
+        return decision
       }
-      return decision
     })
   }
 }

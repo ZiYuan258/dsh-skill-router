@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -427,9 +427,9 @@ The translation is a **glossary plus a proper-noun allow list**, not 872 hand-wr
 
 > **This tab used to be empty, and the reason is worth keeping.** It read the wrong source four times: a guessed node shape; per-turn tool **declarations** from request headers (counting skills merely *offered* to the model as loaded); `useChat().legacy.nodes` (measured at one instant: 210 nodes with **zero tool calls**, against a ledger holding 2,778+ events); and paging written against `source.loadOlder`, which lives on the `session` — so the guard returned on the first line every time and **four "fixes" changed a code path that never executed**. None of the four crashed and all four rendered a plausible list, which is exactly why the data contract had to be measured rather than inferred. The retrospective is in `docs/release-notes-v1.8.0.md`.
 
-## Task-aware skill discovery (**currently a dry run: it measures, it does not inject**)
+## Task-aware skill discovery (**HIGH injection — an experiment with one variable**)
 
-The three tools above solve "there are many skills — how does the agent find one". They do not solve the other half:
+The three tools above answer "there are many skills — how does the agent find one". They do not answer the other half:
 
 > **Will the agent think to look at all?**
 
@@ -445,27 +445,65 @@ the same tokenizer and the same scoreRow used by skill_search (weights live in o
 but NOT that tool's query policy: no strict AND, no all-but-one rescue
    ↓
 top 5, or an explicit "nothing"
+   ↓
+tier === HIGH -> one line put in front of the model; otherwise nothing happens
 ```
 
 **Why the scorer is shared and the query semantics are not.** `skill_search`'s strict AND is built for a short query written by a model; a task is prose, and "分析这个 React 项目的性能问题" has no interpretation under strict AND — which would make this layer fail silently. So the difference stays in the caller and the weights stay in one function.
 
-**This version injects nothing.** It appends one line of telemetry to `~/.dsh/skill-router/discovery.jsonl` and returns the decision untouched. What it measures is what only real data can answer: how often a candidate is meaningful, how often it is wrong, and how often there is nothing at all.
+### Why injection is on, and why **HIGH only**
 
-```json
-{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":2,"elapsedMs":11,
- "candidateCount":1,"candidates":[{"name":"semgrep","score":210,"matched":3,"nameHits":1,"fields":["name","whenToUse"]}],"injected":false}
+What was measured before this shipped: across **273 turns the library was almost never searched**, and every record said `injected: false`. The hypothesis under test is therefore narrow and causal:
+
+> **The agent does not fail to use skills — it is never told which ones are worth considering.**
+
+Testing that needs **exactly one changed variable**, so this version does one thing: when `tier === HIGH`, the candidates are put in front of the model. The retrieval policy — strict AND, the tokenizer, the tier thresholds — is **unchanged**, so a change in behaviour can be attributed to the hint rather than to two edits at once.
+
+The cost is why it is worth trying:
+
+| already paid every turn | tokens |
+|---|---|
+| the resident skill catalog | ~3,238 |
+| the three tool schemas | ~1,001 |
+| **injecting 5 candidates (new in this version)** | **329–341 bytes ≈ 91–95 (measured on a real library)** |
+
+### What gets injected
+
+```
+Maybe relevant skills for this task: semgrep (name, whenToUse); code-review (name).
+Load any that fit with skill_load, or ignore this and continue without one.
 ```
 
-**The raw task text is never written** — only match counts, candidate names and scores. A feature that observes the router should not also start accumulating session content. The log is byte-capped and rotates, so leaving it on for weeks cannot grow without limit.
+**Names and matched fields only, never the descriptions** — the byte budget *is* the design. And it says explicitly that ignoring it is fine: this layer **discovers**, the agent still chooses.
 
-`tier` is the reading that matters at this stage: **HIGH** (a name hit and at least two distinct tokens landing), **MEDIUM** (description-only, or a single weak keyword), **NONE** (not enough signal, or too close to the runner-up). Thresholds get chosen from a few days of data, not from intuition.
+Two implementation details, both verified in the harness rather than assumed:
 
-**Two known boundaries, deliberately not fixed yet — measuring them is the point of a dry run:**
+- **It goes into `decision.messages`, not through `agent.inject()`.** `preStep` calls `inbox.claim()` *before* dispatching the waterfall, so an injected message is only claimed at the **next** step — and this layer has to work on the first one. `decision.messages` is the authoritative batch for the current step.
+- **The injected message carries a unique `id`.** The shape is copied from the framework's own `createUserMessage`: `{ role, content: [{type:'text',text}], source: {kind}, id }`. The id is not decoration — framework messages always carry one, and two injections sharing an id would be indistinguishable downstream.
 
-- **The index matches Latin script only.** The tokenizer is `[^a-z0-9+#._-]`, so a Chinese task ("帮我做一次安全审计") yields zero keywords. That is a property of the index rather than a bug to paper over: such tasks are recorded as `reason: "no-searchable-token"`, and the dry run will say what share of traffic they are. If that share is high, aliases or a bilingual `whenToUse` are the next conversation — **not embeddings, not now**.
+### Telemetry now records two things, because they answer two questions
+
+```json
+{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":1028,
+ "candidateCount":5,"candidates":[…],"injected":true,"hintBytes":206}
+
+{"at":"…","kind":"turn-calls","turn":3,"tier":"HIGH","injected":true,
+ "skillSearchCalls":1,"skillLoadCalls":1,"skillRefCalls":0,"residentSkillCalls":0,"otherToolCalls":7}
+```
+
+**The first is written at `step === 1`, when nobody can yet know whether the turn will search** — so "did the hint make the agent search" has to be answered by the second, and the two are joined by `turn`. The second records **counts only**: no tool arguments, no skill bodies, no user text.
+
+Per-turn counting settles at the **next turn's first step**, because this harness has no hookable end-of-turn waterfall (verified: `agent/turn-stopping` does not exist in `0.1.7-rc.2`, so hooking it would have been instrumentation that never runs). A turn abandoned mid-flight loses its numbers rather than misattributing them — the right failure direction for a measurement.
+
+Three success metrics, in causal order: **① does the agent start calling `skill_search` after a HIGH hint** (the trigger hypothesis) → **② does it then actually `skill_load`** (the candidates produced behaviour, not just a glance) → **③ is the loaded skill relevant to the task** (manual sampling).
+
+**One conservative behaviour already observed (not changed here, logged for the data):** on the real library, `把这个 React 项目的性能问题分析一下` ranks clearly relevant candidates (`react-email`, `vercel-react-best-practices`) but comes out **NONE** — only one token landed, short of HIGH's "at least two distinct tokens" — and therefore **is not injected**. In other words: **a short technical query may never reach HIGH.** Whether that matters is a question for the ① data: if the HIGH hint works, widening coverage is the next question, not loosening the threshold.
+
+### Two known boundaries, deliberately **untouched**, because one variable at a time
+
+- **The index matches Latin script only.** The tokenizer is `[^a-z0-9+#._-]`, so a Chinese task yields zero keywords and is recorded as `reason: "no-searchable-token"` (24.4% measured). Whether to add aliases or a bilingual `whenToUse` is a decision for after the injection data exists — **not embeddings, not now**.
 - **`reason` separates "nothing matched" from "no library"** (`no-library`), so a broken index cannot masquerade as a quiet, well-behaved router.
-
-When injection is switched on it will change in exactly one place, and that place has already been verified: the hint goes into `decision.messages`, **not** through `agent.inject()`. `preStep` calls `inbox.claim()` *before* dispatching the waterfall, so anything injected lands in `next-step` and is only claimed at the **next** step — while this layer has to work on the first one. `decision.messages` is the authoritative batch for the current step (and becomes the session's `user/message`).
+- **`skill_search`'s strict AND also stays as it is.** Every keyword must match, and measured, `systematic debugging failing test root cause` returns nothing while `debugging` returns 21. That is a real second bottleneck, but changing it at the same time as injection would make the result unattributable. The ① data decides.
 
 
 ## Engineering constraints
@@ -505,7 +543,7 @@ Twenty-eight dependency-free scripts. They run against a real staged library whe
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
-| `discovery-dry-run.mjs` | the discovery dry run, which **really calls `apply(ctx)` and drives `agent/pre-step` the way the agent loop does**: three tools plus the listener register, the decision is left untouched, telemetry is written, only step 1 is recorded, a Chinese task records `no-searchable-token`, a `reject` passes through, and **no user text appears in the telemetry** |
+| `discovery-injection.mjs` | the discovery wiring (**HIGH injection + per-turn tool counting**): injection happens only at `tier === HIGH` and `step === 1`, the injected message shape is valid (`role`/`content`/`source`/**unique `id`**), two injections differ in id, `step=2` and NONE do not inject, and the original messages are untouched; telemetry records `injected` and a **measured** `hintBytes`; tool calls are counted **per turn after the turn ends** (the three skill tools separately, the native `skill` tool separately, everything else only in aggregate), with counters reset per turn and no tool arguments or skill bodies in the record |
 | `build-index.mjs` | the index generator: **every row resolves to an existing `SKILL.md` by the plugin's own path rule** (the first version added an extra `repo/` level, so 1,028 rows matched 1,028 while zero resolved — counting cannot catch that), `.git`/`node_modules` skipped, BOM/CRLF/block scalars/missing name/missing description, TSV escaping for tabs and quotes, `whenToUse` written only when needed, and the CLI's three `--check` states including CRLF not counting as drift; against a real library it re-checks every row and compares key sets with the existing index |
 | `doctor.mjs` | every assertion of the library check-up **constructs a real failure and requires it to be reported** (missing index / stale / missing rows / no description / cross-repo duplicates), because a check-up that always says "healthy" would pass a test that only feeds it healthy libraries; `--json` parses and carries no full-library detail |
 | `library-root-contract.mjs` | the **cross-layer contract**: one fixture drives both the runtime (`host.js`) and `doctor.mjs`, asserting they resolve the **same library root** from the same nested cwd, plus both divergence points (past 8 levels neither should find it; on an empty workspace only the runtime falls back to the starter library) |

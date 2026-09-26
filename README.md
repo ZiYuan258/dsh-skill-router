@@ -372,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -420,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.11.0 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -432,7 +432,7 @@ inject: (sessionId, binding) => {
 
 > **这一栏曾经是空的，原因值得留着。** 它先后读错过四次数据源：猜的节点形状、请求头里本轮的**工具声明**（把"给模型看过"当成"被加载过"）、`useChat().legacy.nodes`（实测同一时刻 210 个节点、**0 次工具调用**，而账本里有 2778+ 条事件），以及对着 `source.loadOlder` 写翻页（方法在 `session` 上，于是守卫每次都在第一行返回，**四次"修复"全都改在一条从未执行的代码路径上**）。四次都不崩溃、UI 都画得出来——所以数据契约必须实测，不能推断。复盘见 `docs/release-notes-v1.8.0.md`。
 
-## 任务感知的技能发现（**当前是干跑：只测量，不注入**）
+## 任务感知的技能发现（**HIGH 注入 —— 一次有单一变量的实验**）
 
 上面三个工具解决的是"技能很多，怎么让 Agent 找到"。但它们解决不了另一件事：
 
@@ -450,27 +450,65 @@ inject: (sessionId, binding) => {
 但**不继承那个工具的查询策略**：不做严格 AND、不做 all-but-one 回落
    ↓
 top 5，或明确"什么都没有"
+   ↓
+tier === HIGH → 一句话摆到模型面前；其余什么都不做
 ```
 
 **为什么必须共享 scorer、却不共享查询语义。** `skill_search` 的严格 AND 是为**模型写出来的短查询**设计的；任务句子是散文，"分析这个 React 项目的性能问题"在严格 AND 下没有任何解释——那会让这一层静默失效。所以差异留在调用方，权重留在函数里。
 
-**当前版本不注入任何东西。** 它只往 `~/.dsh/skill-router/discovery.jsonl` 追加一行遥测，然后原样返回决策。测的是你真正需要数据才能回答的三个问题：候选经常有意义吗、误报多不多、多少任务什么都找不到。
+### 为什么开注入，以及为什么**只开 HIGH**
 
-```json
-{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":2,"elapsedMs":11,
- "candidateCount":1,"candidates":[{"name":"semgrep","score":210,"matched":3,"nameHits":1,"fields":["name","whenToUse"]}],"injected":false}
+开之前实测到的状态是：**273 个回合里，库几乎从未被检索过**，而每一条遥测都是 `injected: false`。所以被检验的假设很窄、很因果：
+
+> **Agent 不是不会用技能，而是从没人告诉它有哪些技能值得考虑。**
+
+测这个假设需要**只改一个变量**，所以本版只做一件事：`tier === HIGH` 时把候选摆出来。检索策略（严格 AND、tokenizer、tier 阈值）**一行没动**——这样行为变化才能归因到"提示"，而不是归因到"同时改了两处"。
+
+成本是这件事值得一试的理由：
+
+| 每轮已付出的 | token |
+|---|---|
+| 常驻技能目录 | ~3,238 |
+| 三个工具 schema | ~1,001 |
+| **注入 5 个候选（本版新增）** | **329–341 字节 ≈ 91–95（实测真库）** |
+
+### 注入的是什么
+
+```
+Maybe relevant skills for this task: semgrep (name, whenToUse); code-review (name).
+Load any that fit with skill_load, or ignore this and continue without one.
 ```
 
-记录里**没有用户原文**——只有命中的 token 数量、候选名与分数。一个观察功能不该顺手制造新的会话内容存储。日志有字节上限并轮转，所以放着跑几周也不会无限增长。
+**只有名字与命中的字段，没有描述正文**——字节预算就是设计本身。并且明确写着"可以都不用"：这一层负责**发现**，选择仍然在 Agent 手里。
 
-`tier` 是这个阶段的核心读数：**HIGH**（命中 name 且 ≥2 个不同 token 落地）、**MEDIUM**（只有 description 命中、或单个弱关键词）、**NONE**（没有足够区分度，或与第二名咬得太近）。几天数据之后才谈"阈值该定在哪"，而不是凭感觉定。
+两处已经取证过的实现细节：
 
-**两个已知边界，现在不修，因为干跑的意义就是先量它们：**
+- **放进 `decision.messages`，不是 `agent.inject()`。** `preStep` 在派发瀑布**之前**就调用了 `inbox.claim()`，`inject()` 的东西要等到**下一步**才被取走——而这一层要在第一步就起作用。`decision.messages` 才是当前这一步进入请求的权威批次。
+- **注入的消息带唯一 `id`。** 形状照框架自己的 `createUserMessage` 抄：`{ role, content: [{type:'text',text}], source: {kind}, id }`。id 不是装饰：框架消息总是带一个，两条注入共享 id 会让下游无法区分。
 
-- **索引只认 Latin script。** tokenizer 是 `[^a-z0-9+#._-]`，所以中文任务（"帮我做一次安全审计"）产出 0 个关键词。这不是缺陷需要掩盖，而是索引的性质：这类任务记为 `reason: "no-searchable-token"`，干跑会告诉你它占多少比例。如果比例很高，下一步再考虑 aliases 或双语的 `whenToUse`——**不是现在上 embedding**。
+### 遥测现在记两件事，因为它们回答的是两个问题
+
+```json
+{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":1028,
+ "candidateCount":5,"candidates":[…],"injected":true,"hintBytes":206}
+
+{"at":"…","kind":"turn-calls","turn":3,"tier":"HIGH","injected":true,
+ "skillSearchCalls":1,"skillLoadCalls":1,"skillRefCalls":0,"residentSkillCalls":0,"otherToolCalls":7}
+```
+
+**第一条写在 `step === 1`，那时谁也不知道这一回合会不会去搜**——所以"提示有没有让 Agent 去搜"必须由第二条回答，两条靠 `turn` 对齐。第二类记录只记**计数**：没有工具参数、没有技能正文、没有用户原文。
+
+按回合的计数是在**下一个回合的第一步**结算的，因为这个 harness 里没有可挂的回合结束瀑布（已核实：`agent/turn-stopping` 在 `0.1.7-rc.2` 里不存在，挂上去会是"永不执行的埋点"）。因中止/崩溃而未结算的回合，其数字是**丢失**而不是错记——对一次测量来说这是正确的失败方向。
+
+三个成功指标，按因果关系排序：**① HIGH 提示后 Agent 是否开始 `skill_search`**（验证触发假设）→ **② 搜到之后是否真的 `skill_load`**（验证候选产生了行为，而不只是被看了一眼）→ **③ 加载的技能与任务是否真的相关**（人工抽样）。
+
+**一个已经观测到的保守之处（本次不改，登记待数据）：** 真库实测里 `把这个 React 项目的性能问题分析一下` 排出了 `react-email`/`vercel-react-best-practices` 等明显相关的候选，但 tier 是 **NONE**（只有一个 token 落地，够不到 HIGH 要求的"≥2 个不同 token"），**于是不注入**。也就是说：**短技术查询可能永远够不到 HIGH**。这是不是问题，要等 ① 的数据——如果 HIGH 提示确实有效，那么扩大覆盖面（而不是放松阈值）才是下一步。
+
+### 两个已知边界，现在**不动**，因为一次只验证一个变量
+
+- **索引只认 Latin script。** tokenizer 是 `[^a-z0-9+#._-]`，所以中文任务（"帮我做一次安全审计"）产出 0 个关键词。这不是缺陷需要掩盖，而是索引的性质：这类任务记为 `reason: "no-searchable-token"`（实测占 24.4%）。等注入跑出数据再决定补 aliases 还是双语 `whenToUse`——**不是现在上 embedding**。
 - **`reason` 区分"没有匹配"和"没有库"**（`no-library`）。否则一个坏掉的索引会看起来像一个安静的、表现良好的路由器。
-
-正式启用时（注入）会改一处，而且这一处已经取证过：hint 要放进 `decision.messages`，**不是** `agent.inject()`。因为 `preStep` 在派发瀑布**之前**就调用了 `inbox.claim()`，`inject()` 的东西要等到**下一步**才被取走——而这一层要在第一步就起作用；`decision.messages` 才是当前这一步真正进入请求的权威批次（并且会落成会话里的 `user/message`）。
+- **`skill_search` 的严格 AND 也先不动。** 四个关键词必须全部出现，实测 `systematic debugging failing test root cause` 归零、而 `debugging` 命中 21 条——这是真实的第二瓶颈，但**与注入同时改就无法归因**。等 ① 的数据说话。
 
 
 ## 工程约束
@@ -510,7 +548,7 @@ npm test
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
-| `discovery-dry-run.mjs` | 发现层的干跑，**真的调用 `apply(ctx)` 并像 agent-loop 一样触发 `agent/pre-step`**：注册三个工具与监听、**不改变决策**、写出遥测、只在第一步记录、中文任务记 `no-searchable-token`、`reject` 原样返回，以及**遥测里没有用户原文** |
+| `discovery-injection.mjs` | 发现层的接线（**HIGH 注入 + 每回合工具计数**）：注入只发生在 `tier === HIGH` 且 `step === 1`、注入消息形状合法（`role`/`content`/`source`/**唯一 `id`**）、两次注入 id 不同、`step=2` 与 NONE 不注入、原文消息未被改动；遥测如实记 `injected` 与**实测** `hintBytes`；工具调用**在回合结束后**按回合计数（三个技能工具各记、原生 `skill` 单独记、其它工具只汇总），且计数按回合归零、记录里没有工具参数与正文 |
 | `build-index.mjs` | 索引生成器：**每一行都按插件的路径规则解析到真实存在的 `SKILL.md`**（第一版 `relpath` 多套了一层 `repo/`，行数 1028 = 1028 却 0 行可解析——计数检查抓不到这种错）、`.git`/`node_modules` 被跳过、BOM/CRLF/块标量/缺 name/缺 description 各形状、制表符与引号的 TSV 转义、`whenToUse` 只在需要时写第 7 列、CLI 的 `--check` 三态与 CRLF 不算过期；有真库时逐行复核并与现有索引比键集合 |
 | `doctor.mjs` | 库体检的**每条断言都构造一种真实故障**并要求它被报出来（索引不存在 / 过期 / 缺失 / 无 description / 跨仓库重名），因为一个永远返回"健康"的体检工具也能通过"健康库返回 OK"那种测试；`--json` 可解析且不含整库明细 |
 | `library-root-contract.mjs` | **跨层契约**：同一份夹具同时驱动运行时（`host.js`）与 `doctor.mjs`，断言两者从同一个嵌套 cwd 得到**同一个库根**；并覆盖两个分叉点（超过 8 层两者都不该找到；空工作区只有运行时回退入门库） |
