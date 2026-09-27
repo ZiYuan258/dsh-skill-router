@@ -1620,7 +1620,6 @@ export function apply(ctx, config) {
      * of concurrent sessions while keeping the log free of host identifiers.
      */
     const sessionKeyOf = (session) => {
-      const dbg = globalThis.__sk; if (Array.isArray(dbg)) dbg.push({ keys: session === null || session === undefined ? 'null' : Object.keys(session).join(','), id: session && session.id })
       const id = session === undefined || session === null || session.id === undefined ? '' : String(session.id)
       return id === '' ? 'unknown' : createHash('sha256').update(id).digest('hex').slice(0, 8)
     }
@@ -1655,10 +1654,7 @@ export function apply(ctx, config) {
       if (step !== 1) return decision
       // A new turn starting means the previous one is over: flush it before measuring this one.
       // Keyed by session, so a concurrent conversation cannot settle this one's counts.
-      const dbgAgent = agent
-      const dbgSession = dbgAgent === undefined || dbgAgent === null ? undefined : dbgAgent.session
-      const sessionKey = sessionKeyOf(dbgSession)
-      const dbg2 = globalThis.__pre; if (Array.isArray(dbg2)) dbg2.push({ agentKeys: dbgAgent === undefined || dbgAgent === null ? 'null' : Object.keys(dbgAgent).join(','), sessionKeys: dbgSession === undefined || dbgSession === null ? 'null' : Object.keys(dbgSession).join(','), id: dbgSession && dbgSession.id, key: sessionKey })
+      const sessionKey = sessionKeyOf(agent === undefined || agent === null ? undefined : agent.session)
       flush(sessionKey)
       const taskText = taskTextOf(messages).trim()
       if (taskText === '') return decision

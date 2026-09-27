@@ -12,7 +12,7 @@ dsh plugin --profile web add github:ZiYuan258/dsh-skill-router
 >
 > **1. The owner has to be `ZiYuan258`.** Eight repositories on GitHub share this name (this one is the newest, created 2026-09-23). Several of them **auto-inject**: they read the user's message before the model answers and put a skill's full body straight into the prompt.
 >
-> **2. This plugin does not auto-inject, deliberately.** It puts candidates in front of the agent and **lets the agent decide what to load**, including nothing at all. A comparison table of the same-named repositories is further down.
+> **2. This plugin never auto-loads or injects a skill's body — but it does auto-suggest, deliberately.** At the start of a task it may put **a few candidate skill names (names only, never bodies)** in front of the agent, and **whether anything gets loaded is the agent's decision**, including loading nothing at all. A comparison table of the same-named repositories is further down.
 
 > **Only a dozen or two skills? This plugin is not for you.**
 > A single task usually uses just a few skills, so **when the set is small, keeping them resident is cheaper** — the catalog is DSH's native mechanism and it works. This plugin addresses the other situation: **more skills than will fit in the catalog.**
@@ -165,7 +165,7 @@ dsh plugin --profile <profile> remove dsh-skill-router
 | Who chooses | **the agent** — it reads the candidates and may pick none | **the plugin** — a routing hit is injected |
 | Dependencies | zero dependencies, zero imports | varies; some need a local model or embeddings |
 
-**The two take opposite positions, and that is this plugin's deliberate design rather than a gap.** See the task-aware discovery section below: that layer only discovers, and currently only measures rather than injecting.
+**The two take opposite positions, and that is this plugin's deliberate design rather than a gap.** See the task-aware discovery section below: that layer **automatically suggests a few candidate skill names** (at `tier === HIGH`, one line of names and matched fields) but **never auto-loads or injects a skill's body** — a body only enters the context through `skill_load`, and that call is always the agent's.
 
 Others in the family include `MJorgin/dsh-skill-router` (rule-first pre-step routing) and `Phantomcyber-ai/dsh-skill-router` (intent-level auto-routing); some are placeholders or unfinished. **Check that the owner is `ZiYuan258` before installing.**
 
@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.13.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.13.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.13.0 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.13.1 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -541,7 +541,9 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 
 The plugin now ships **no `node_modules` and no dependencies**, and builds its tool definitions locally in standard JSON Schema, so they are valid whether or not the runtime compiles schemas. The registry's compiler is stricter than its assertion in one place: an object schema must state `additionalProperties` explicitly. `test/boot-safety.mjs` turns all of this into assertions, including "the build fails if any `@deepseek-ai/*` appears in `dependencies`".
 
-**Why there is no ledger or dedup state.** The plugin never injects anything automatically, so there is no "already injected this session" state to maintain. Whether to reload something is the model's decision — a structural simplification that tool-driven retrieval gets for free compared with pre-step routing.
+**Why there is no ledger or dedup state.** The plugin never auto-loads a skill body, so there is no "already loaded this session" state to maintain. Whether to reload something is the model's decision — a structural simplification that tool-driven retrieval gets for free compared with pre-step routing.
+
+(The discovery hint is a bounded exception to that rule, and it needs no ledger either: it appears once, at `step === 1`, carries only names and matched fields, and whether it is injected is decided **within that turn** by the tier — there is no cross-turn state to keep.)
 
 ## Tests
 
@@ -568,7 +570,7 @@ Thirty dependency-free scripts. They run against a real staged library when one 
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
-| `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry into the three metrics and keeps **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
+| `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry into the three metrics and keeps **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions), deduped per turn for real (several discovery records collapse to the last, several counting records are summed, or one turn counts twice in numerator and denominator); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
 | `discovery-ranking.mjs` | the **candidate-generator quality guard**: corpus-frequency filtering (a word carried by every row cannot score, `corpusFrequency` reports the ratio, the 80% boundary keeps and >80% drops, and an all-common task reports `no-discriminating-token`), dedupe by skill name (one slot per name, best-scoring copy kept), **tier computed over the deduped effective tokens** (a 100%-frequency word cannot forge HIGH), and genuine strong candidates still reaching HIGH; against a real library it samples that `skill`/`skills` really are 100% words, that a security-audit task ranks `semgrep` first, that a code-review task ranks `code-review` first, and that no candidate list repeats a name |
 | `discovery-injection.mjs` | the discovery wiring (**HIGH injection + per-turn tool counting**): injection happens only at `tier === HIGH` and `step === 1`, the injected message shape is valid (`role`/`content`/`source`/**unique `id`**), two injections differ in id, `step=2` and NONE do not inject, and the original messages are untouched; telemetry records `injected` and a **measured** `hintBytes`; tool calls are counted **per turn after the turn ends** (the three skill tools separately, the native `skill` tool separately, everything else only in aggregate), with counters reset per turn and no tool arguments or skill bodies in the record |
 | `build-index.mjs` | the index generator: **every row resolves to an existing `SKILL.md` by the plugin's own path rule** (the first version added an extra `repo/` level, so 1,028 rows matched 1,028 while zero resolved — counting cannot catch that), `.git`/`node_modules` skipped, BOM/CRLF/block scalars/missing name/missing description, TSV escaping for tabs and quotes, `whenToUse` written only when needed, and the CLI's three `--check` states including CRLF not counting as drift; against a real library it re-checks every row and compares key sets with the existing index |

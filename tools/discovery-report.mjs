@@ -42,10 +42,27 @@ export function pairKey(record) {
 }
 
 /**
- * 读日志并按回合配对。
+ * 读日志并按**回合**配对。
+ *
+ * ── 为什么必须真的去重，而不是"生产上应该不会重复"────────────────────────────────
+ *
+ * 一个回合可能写下**多条发现记录**（重复的 pre-step：框架重试、测试夹具、将来的分叉）。第一版
+ * 对每条发现记录都 push 一次，于是 `paired` 的长度是**记录数**而不是**回合数**。后果不是显示问题：
+ * `injected.pairedTurns`、`searchRate`、`loadRate` 全部被重复计数——同一回合在分子和分母里各算
+ * 两次，足以把一个真实差异抹平。而它最危险的地方在于**读数看起来很合理**：没有报错、没有异常值，
+ * 只是一个悄悄变大的分母。
+ *
+ * 所以配对单元是 `(sessionKey, turn)`：
+ *
+ *   * 多条发现记录 → **取最后一条**（同一回合的 tier 不会变；晚写的那条是最终裁定）
+ *   * 多条计数记录 → **逐项求和**（单条记录已经是"该回合的累计值"，多条意味着该回合被结算过两次，
+ *     相加才是这一回合真实发生的调用总数）
+ *
+ * `paired.length` 因此**等于唯一回合数**，这也正是实验门槛"50 个回合"该数的东西。
  *
  * @param text - JSONL 文本。
- * @returns `{ discovery, calls, paired, unpaired, malformed }`。`paired` 是按回合合并后的记录。
+ * @returns `{ discovery, calls, paired, unpaired, malformed, legacy }`。`paired` 与 `unpaired`
+ *   都按 `(sessionKey, turn)` 去重，每回合各一条。
  */
 export function pairTurns(text) {
   const discovery = []
@@ -65,14 +82,29 @@ export function pairTurns(text) {
     //
     // 曾经只用 turn：遥测里没有会话标识，于是两个会话各自的 turn 12 是同一条记录。实测到 14 个
     // turn 号被重复。按 turn 配对会把不同会话合并——足以把结论算反。
-    if (record.kind === 'turn-calls') calls.set(pairKey(record), record)
-    else discovery.push(record)
+    if (record.kind === 'turn-calls') {
+      const key = pairKey(record)
+      const seen = calls.get(key)
+      // 求和而不是覆盖：每条计数记录是"该回合的累计值"，多条意味着该回合被结算过多次。
+      calls.set(key, seen === undefined ? { ...record } : {
+        ...record,
+        skillSearchCalls: (seen.skillSearchCalls ?? 0) + (record.skillSearchCalls ?? 0),
+        skillLoadCalls: (seen.skillLoadCalls ?? 0) + (record.skillLoadCalls ?? 0),
+        skillRefCalls: (seen.skillRefCalls ?? 0) + (record.skillRefCalls ?? 0),
+        residentSkillCalls: (seen.residentSkillCalls ?? 0) + (record.residentSkillCalls ?? 0),
+        otherToolCalls: (seen.otherToolCalls ?? 0) + (record.otherToolCalls ?? 0),
+      })
+    } else {
+      discovery.push(record)
+    }
   }
+  // 一回合一条：后写的覆盖先写的。保持插入顺序，所以报告里仍是时间顺序。
+  const lastPerTurn = new Map()
+  for (const found of discovery) lastPerTurn.set(pairKey(found), found)
   const paired = []
   const unpaired = []
-  for (const found of discovery) {
-    const counted = calls.get(pairKey(found))
-    // 同一回合可能有多条发现记录（例如测试里的重复 pre-step）。配对按回合，取最后一条计数。
+  for (const [key, found] of lastPerTurn) {
+    const counted = calls.get(key)
     if (counted === undefined) unpaired.push(found)
     else paired.push({ ...found, calls: counted })
   }

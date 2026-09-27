@@ -40,6 +40,33 @@ ok('① 注入后搜索率按 paired 算（1/1）', s1.injected.searchRate === 1
 ok('② 加载率按 paired 算（1/1）', s1.injected.loadRate === 1, String(s1.injected.loadRate))
 ok('未注入的对照也在（turn 3, 0 次搜索）', s1.notInjected.pairedTurns === 1 && s1.notInjected.searchRate === 0, JSON.stringify(s1.notInjected))
 
+// ── 1b) 同一回合多条发现记录：必须去重成**一个回合** ──────────────────────────
+//
+// 这条是漏掉的覆盖，也正是它让一个真 bug 活了下来：第一版对每条发现记录都 push 一次，于是
+// paired.length 是**记录数**而不是**回合数**，而注释却写着"取最后一条"。后果不是显示问题——
+// injected.pairedTurns / searchRate / loadRate 全部被重复计数，同一回合在分子分母里各算两次，
+// 足以把真实差异抹平；而读数看起来完全正常，只是一个悄悄变大的分母。
+const dupTurn = [disc(7, 'HIGH'), disc(7, 'HIGH'), call(7, 1, 0)].join('\n')
+const pDup = pairTurns(dupTurn)
+ok('同回合两条发现记录 → paired 只有 1（不是 2）', pDup.paired.length === 1, 'paired=' + pDup.paired.length)
+ok('unpaired 也不会重复计数', pDup.unpaired.length === 0, 'unpaired=' + pDup.unpaired.length)
+const sDup = summarise(pDup)
+ok('分母是回合数（1），所以比率不被稀释', sDup.injected.pairedTurns === 1 && sDup.injected.searchRate === 1, JSON.stringify({ turns: sDup.injected.pairedTurns, rate: sDup.injected.searchRate }))
+// 取最后一条：tier 由晚写的那条裁定
+const lastWins = [disc(8, 'HIGH'), disc(8, 'NONE', { injected: false }), call(8, 1, 0, { injected: false, tier: 'NONE' })].join('\n')
+const pLast = pairTurns(lastWins)
+ok('同回合取**最后一条**发现记录（tier 由它裁定）', pLast.paired.length === 1 && pLast.paired[0].tier === 'NONE', JSON.stringify(pLast.paired.map((r) => r.tier)))
+// 同一回合被结算两次 → 计数求和（每条已是"该回合累计值"）
+const twoFlush = [disc(9, 'HIGH'), call(9, 2, 1), call(9, 1, 0)].join('\n')
+const sFlush = summarise(pairTurns(twoFlush))
+const pFlush = pairTurns(twoFlush)
+ok('同回合多条计数记录 → 逐项求和（search=3, load=1）', pFlush.paired[0].calls.skillSearchCalls === 3 && pFlush.paired[0].calls.skillLoadCalls === 1, JSON.stringify(pFlush.paired[0].calls))
+// 两条发现记录但无计数 → unpaired 也只有 1
+const dupUnpaired = [disc(10, 'HIGH'), disc(10, 'HIGH')].join('\n')
+ok('无计数的重复回合 → unpaired 只有 1', pairTurns(dupUnpaired).unpaired.length === 1)
+// 不同回合仍然各自计数
+ok('不同回合不受去重影响', pairTurns([disc(1, 'HIGH'), call(1, 1, 0), disc(2, 'HIGH'), call(2, 0, 1)].join('\n')).paired.length === 2)
+
 // ── 2) 反例：如果错误地把 unpaired 当成 0，比率会被拉低 ────────────────────────
 // 3 个注入回合，1 个有计数且搜了、2 个无计数。正确 = 1/1 = 100%；错误 = 1/3 = 33%。
 const text2 = [disc(1, 'HIGH'), call(1, 1, 0), disc(2, 'HIGH'), disc(3, 'HIGH')].join('\n')

@@ -84,21 +84,25 @@ function checkPair(label, defaultFile, alternateFile, facts) {
 // 仓库时只有几秒钟判断这是不是他要的那个，所以两件事必须出现在**第一个二级标题之前**：
 //
 //   1. owner 是 ZiYuan258（否则装到的是另一个插件）；
-//   2. 本插件不做自动注入，加载由 agent 决定。
+//   2. 本插件的边界：**自动提示候选、不自动加载正文**。
+//
+// 这条在 v1.13.1 之前查的是"不做自动注入"——而那正是已经与代码冲突的那句话（HIGH 候选现在
+// 确实会被注入当前 step）。断言跟着过时的语义走，就会把事实错误锁死在文档里，所以它必须一起改。
 //
 // 写在文档深处等于没写——README 里原本就有一节同名对照表，但在一百多行之后。位置本身会漂移，
 // 靠人眼守不住，所以让它变成一条会红的断言。
 console.log('README opening:')
 for (const [file, ownerNeedle, stancePattern] of [
-  ['README.md', 'github:ZiYuan258/dsh-skill-router', /不做自动注入|自动注入.*有意/],
-  ['README.en.md', 'github:ZiYuan258/dsh-skill-router', /does not auto-inject/i],
+  // 中文与英文都必须说出**两条**边界：不加载正文，但会提示候选。
+  ['README.md', 'github:ZiYuan258/dsh-skill-router', /不会自动加载或注入技能正文[\s\S]{0,80}自动提示候选/],
+  ['README.en.md', 'github:ZiYuan258/dsh-skill-router', /never auto-loads or injects a skill's body[\s\S]{0,120}auto-suggest/i],
 ]) {
   const text = read(file)
   const firstHeading = text.split('\n').findIndex((line) => /^##\s/.test(line))
   const opening = firstHeading < 0 ? text : text.split('\n').slice(0, firstHeading).join('\n')
   const lines = opening.split('\n').length
   if (opening.includes(ownerNeedle) === false) problems.push(`${file}: the opening does not carry the owner-qualified install command (first ${lines} lines)`)
-  if (stancePattern.test(opening) === false) problems.push(`${file}: the opening does not state that this plugin does not auto-inject (first ${lines} lines)`)
+  if (stancePattern.test(opening) === false) problems.push(`${file}: the opening does not state the boundary — auto-suggests candidates, never auto-loads a skill body (first ${lines} lines)`)
   console.log(`  ${file}: opening is ${lines} lines, owner=${opening.includes(ownerNeedle)}, stance=${stancePattern.test(opening)}`)
 }
 
