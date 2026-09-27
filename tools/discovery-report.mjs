@@ -143,9 +143,11 @@ export function summarise(pairs, options) {
   //     天然不独立。
   const byArm = (arm) => pairs.paired.filter((t) => t.arm === arm)
   const rate = (list, field) => {
-    if (list.length === 0) return { turns: 0, calls: 0, rate: null }
+    if (list.length === 0) return { turns: 0, calls: 0, misses: 0, rate: null, interval: null }
     const hits = list.filter((t) => (t.calls[field] ?? 0) > 0).length
-    return { turns: list.length, calls: hits, rate: hits / list.length }
+    // 计数与区间一起给：单看一个比例会让人忘记 n 有多小。"未命中"是显式字段而不是减法，
+    // 这样报告里能直接印出 \`8 yes / 17 no\`，读者不必自己减。
+    return { turns: list.length, calls: hits, misses: list.length - hits, rate: hits / list.length, interval: wilsonInterval(hits, list.length) }
   }
   // 每个会话的第一个 eligible opportunity：整个读数的主指标就建立在这上面。
   //
@@ -178,8 +180,8 @@ export function summarise(pairs, options) {
     experiment: {
       // **主指标**：每会话一个独立观测。
       primary: {
-        treatment: { ...rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillLoadCalls') },
-        control: { ...rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillLoadCalls') },
+        treatment: { ...rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillLoadCalls'), loadGivenSearch: rate(firstPerSession.filter((t) => t.arm === 'treatment' && (t.calls.skillSearchCalls ?? 0) > 0), 'skillLoadCalls') },
+        control: { ...rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillLoadCalls'), loadGivenSearch: rate(firstPerSession.filter((t) => t.arm === 'control' && (t.calls.skillSearchCalls ?? 0) > 0), 'skillLoadCalls') },
         sessions: firstPerSession.length,
       },
       // **探索性**：同一会话的后续 opportunity，不独立，只作参考。
@@ -208,6 +210,31 @@ export function summarise(pairs, options) {
     hintBytes: pairs.paired.filter((t) => t.injected === true).map((t) => t.hintBytes ?? 0),
     indexRows: [...new Set(pairs.discovery.map((t) => t.indexRows).filter((n) => typeof n === 'number'))],
   }
+}
+
+/**
+ * Wilson score interval for a binomial proportion, at 95%.
+ *
+ * **为什么不用朴素正态近似**（\`p ± 1.96·sqrt(p(1-p)/n)\`）：在实验真正会遇到的取值上它会坏掉。
+ * 50 个会话、control 组 0 次搜索时，正态近似给出 [0, 0]——一个把"没观测到"说成"不可能发生"的区间；
+ * 而 25 个样本里的 1 次搜索会给出下界为负的区间。Wilson 在这些位置仍然给出可解释的结果，实现也
+ * 只多两行，所以没有理由用会撒谎的那个。
+ *
+ * 这不是"统计模型"——它只是把"n 这么小时，这个比例有多不确定"变成一个数字。用户明确要的是
+ * 一个简单的不确定性区间，而不是把项目变成统计练习。
+ *
+ * @param successes - 命中数。
+ * @param total - 分母。
+ * @returns \`{ low, high }\`，0..1；total 为 0 时返回 null。
+ */
+export function wilsonInterval(successes, total, z = 1.96) {
+  if (typeof total !== 'number' || total <= 0) return null
+  const n = total
+  const p = successes / n
+  const z2 = z * z
+  const centre = (p + z2 / (2 * n)) / (1 + z2 / n)
+  const spread = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / (1 + z2 / n)
+  return { low: Math.max(0, centre - spread), high: Math.min(1, centre + spread) }
 }
 
 const pct = (value) => (value === null || value === undefined ? 'n/a' : (value * 100).toFixed(1) + '%')
@@ -239,14 +266,42 @@ export function renderReport(summary) {
   const delta = (a, b) => (a === null || b === null ? null : (a - b) * 100)
   lines.push('① 提示 → Agent 是否开始 skill_search（**主指标**）')
   lines.push('  每会话取第一个 eligible opportunity，一 session 一个独立观测：')
-  lines.push('  ' + pad('treatment（有提示）：', 26) + e.primary.treatment.turns + ' 个会话，' + e.primary.treatment.calls + ' 个搜了 → ' + pct(e.primary.treatment.rate))
-  lines.push('  ' + pad('control（无提示）：', 26) + e.primary.control.turns + ' 个会话，' + e.primary.control.calls + ' 个搜了 → ' + pct(e.primary.control.rate))
+  // 每组都印 n、命中数、**未命中数**（显式给出，读者不必自己减）与 95% 区间。
+  // 比例单看会让人忘记 n 有多小：8/25 与 20/25 的 Δ 都算得出来，但证据强度差一个量级。
+  const armLine = (label, arm) => {
+    const r = arm
+    const iv = r.interval === null ? '（无样本）' : '95% 区间 [' + pct(r.interval.low) + ', ' + pct(r.interval.high) + ']'
+    return '  ' + pad(label, 26) + 'n=' + r.turns + '  搜了 ' + r.calls + ' / 没搜 ' + r.misses + ' → ' + pct(r.rate) + '  ' + iv
+  }
+  lines.push(armLine('treatment（有提示）：', e.primary.treatment))
+  lines.push(armLine('control（无提示）：', e.primary.control))
   const primaryDelta = delta(e.primary.treatment.rate, e.primary.control.rate)
-  if (primaryDelta !== null) lines.push('  ' + pad('差值：', 26) + (primaryDelta >= 0 ? '+' : '') + primaryDelta.toFixed(1) + ' 个百分点')
+  if (primaryDelta !== null) {
+    lines.push('  ' + pad('Δ（差值）：', 26) + (primaryDelta >= 0 ? '+' : '') + primaryDelta.toFixed(1) + ' 个百分点')
+    // 粗略判读：两个区间不重叠时，差值通常也是可信的；重叠则"还看不出来"。
+    const ti = e.primary.treatment.interval
+    const ci = e.primary.control.interval
+    if (ti !== null && ci !== null) {
+      const overlap = ti.low <= ci.high && ci.low <= ti.high
+      lines.push('  ' + pad('区间是否重叠：', 26) + (overlap ? '重叠 → **这个样本量还分不出差异**，别急着下结论' : '不重叠 → 差异方向可信（仍不是效应量估计）'))
+    }
+    if (e.primary.treatment.turns < 20 || e.primary.control.turns < 20) {
+      lines.push('  ' + pad('', 26) + '⚠️ 某一臂 n<20，区间会很宽——这是"信息不足"，不是"没有效果"')
+    }
+  }
   lines.push('')
-  lines.push('② search → skill_load（主指标样本内）')
-  lines.push('  ' + pad('treatment 里加载了：', 26) + e.primary.treatment.load.calls + ' → ' + pct(e.primary.treatment.load.rate))
-  lines.push('  ' + pad('control 里加载了：', 26) + e.primary.control.load.calls + ' → ' + pct(e.primary.control.load.rate))
+  lines.push('② search → skill_load（**给定搜过**的加载率——这才是"搜了会不会用"）')
+  // 两个分母都要给，因为它们回答不同的问题：
+  //   * 条件率（分母＝该臂**搜过**的会话）回答"搜了之后会不会真的用"；
+  //   * 全漏斗（分母＝该臂全部首观测）回答"一个机会最终有多大比例真的加载了"。
+  // 只给后者会把"根本没搜"混进来，读起来像"搜了却不用"——那正是我第一版的错误。
+  const condLine = (label, arm) => {
+    const c = arm.loadGivenSearch
+    return '  ' + pad(label, 26) + 'n=' + c.turns + '（搜过的）  加载 ' + c.calls + ' / 没加载 ' + c.misses + ' → ' + pct(c.rate) + (c.interval === null ? '' : '  95% 区间 [' + pct(c.interval.low) + ', ' + pct(c.interval.high) + ']')
+  }
+  lines.push(condLine('treatment：', e.primary.treatment))
+  lines.push(condLine('control：', e.primary.control))
+  lines.push('  ' + pad('全漏斗（分母＝全部首观测）：', 30) + 'treatment ' + pct(e.primary.treatment.load.rate) + '，control ' + pct(e.primary.control.load.rate))
   lines.push('')
   lines.push('③ 候选相关性（HIGH 的 top-5 里至少一个明显相关）')
   lines.push('  **这个脚本算不出来，必须人工抽样。** 且它是前置门槛：相关性不过关时，①② 的差值没有解释力。')

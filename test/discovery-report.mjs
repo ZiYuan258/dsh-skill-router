@@ -20,7 +20,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { main, pairKey, pairTurns, summarise } from '../tools/discovery-report.mjs'
+import { main, pairKey, pairTurns, summarise, wilsonInterval } from '../tools/discovery-report.mjs'
 
 const problems = []
 const ok = (label, passed, detail) => {
@@ -144,6 +144,34 @@ ok('未给 T0 时闸门标记为关', sOpen.experiment.birthGate === 'off')
 ok('未给 T0 时三个会话都进主指标（闸门确实关着）', sOpen.experiment.primary.sessions === 3, 'sessions=' + sOpen.experiment.primary.sessions)
 // 排除只作用于**主指标**，探索性/全量仍可见（不该把数据藏起来）
 ok('被排除的会话仍出现在全量里', sGated.experiment.pooled.turns === 3, 'pooled=' + sGated.experiment.pooled.turns)
+
+// ── 7c) 计数与不确定性：Δ 算得出来不等于证据够 ────────────────────────────────
+//
+// 用户的要求：读完 50 个以后要同时看每组的 n、yes/no 与一个**简单**的不确定性区间，因为
+// "8/25 vs 5/25" 和 "20/25 vs 4/25" 虽然都能算出 Δ，证据强度差一个量级。
+ok('Wilson：0/25 的上界是 13.3% 而不是 0（朴素正态会给 [0,0]）', (() => { const i = wilsonInterval(0, 25); return Math.abs(i.high - 0.133) < 0.005 && i.low === 0 })())
+ok('Wilson：1/25 的下界不为负（朴素正态会给负数）', wilsonInterval(1, 25).low > 0, String(wilsonInterval(1, 25).low))
+ok('Wilson：25/25 的上界封在 1，下界 < 1', (() => { const i = wilsonInterval(25, 25); return i.high === 1 && i.low > 0.8 })())
+ok('Wilson：n=0 返回 null 而不是 NaN', wilsonInterval(0, 0) === null)
+ok('Wilson：区间包含点估计', (() => { const i = wilsonInterval(8, 25); return i.low < 8 / 25 && 8 / 25 < i.high })())
+ok('Wilson：n 越大区间越窄', (() => { const a = wilsonInterval(4, 25), b = wilsonInterval(40, 250); return (b.high - b.low) < (a.high - a.low) })())
+// 计数：yes/no 都要显式给出，读者不必自己减
+const counts = summarise(pairTurns([disc(1, 'HIGH'), call(1, 1, 1), disc(2, 'HIGH'), call(2, 0, 0)].join('\n'))).experiment.primary.treatment
+ok('rate() 给出 misses（未命中数），不是让读者自己减', counts.turns === 2 && counts.calls === 1 && counts.misses === 1, JSON.stringify(counts))
+ok('rate() 带上区间', counts.interval !== null && counts.interval.low < 0.5 && counts.interval.high > 0.5, JSON.stringify(counts.interval))
+// 条件加载率：分母必须是"搜过的"，不是全部首观测
+const cond = summarise(pairTurns([
+  disc(1, 'HIGH'), call(1, 1, 1),   // 搜了也加载了
+  disc(2, 'HIGH'), call(2, 1, 0),   // 搜了没加载
+  disc(3, 'HIGH'), call(3, 0, 0),   // 没搜
+].join('\n'))).experiment.primary.treatment
+ok('条件加载率分母＝搜过的（2），不是全部（3）', cond.loadGivenSearch.turns === 2, 'n=' + cond.loadGivenSearch.turns)
+ok('条件加载率＝1/2（搜了但没用会被算成未加载）', cond.loadGivenSearch.calls === 1 && cond.loadGivenSearch.rate === 0.5, JSON.stringify(cond.loadGivenSearch))
+ok('全漏斗分母＝全部首观测（3）', cond.load.turns === 3 && cond.load.calls === 1, JSON.stringify(cond.load))
+ok('两个分母不同，所以两个数都报', cond.loadGivenSearch.rate !== cond.load.rate)
+// 一条都没搜时条件率的分母为 0，不能崩也不能报成 0%
+const none = summarise(pairTurns([disc(1, 'HIGH'), call(1, 0, 0)].join('\n'))).experiment.primary.treatment
+ok('无人搜索时条件率 n=0 且 rate 为 null（不是 0%）', none.loadGivenSearch.turns === 0 && none.loadGivenSearch.rate === null, JSON.stringify(none.loadGivenSearch))
 
 // ── 8) CLI ────────────────────────────────────────────────────────────────────
 const dir = mkdtempSync(join(tmpdir(), 'report-'))
