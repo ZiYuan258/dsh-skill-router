@@ -1605,6 +1605,46 @@ function discoveryHint(result) {
  * sharing an id would be indistinguishable to anything that keys on it — so it is random per call
  * and there is an assertion for it in the tests.
  */
+/**
+ * The session's creation time as an ISO string, or `null` when it cannot be established.
+ *
+ * ── why this is recorded at all ─────────────────────────────────────────────────────────
+ *
+ * `firstEligibleSeen` is process memory and is empty after a restart, while a session is durable
+ * and resumable. So a session that already received hints before the restart can later present its
+ * next HIGH opportunity as "this session's first" — the contamination did not disappear, it moved
+ * from across turns to across processes. The experiment protocol therefore admits only sessions
+ * **created after T0**, and that needs a creation time on every record.
+ *
+ * ── why it is normalised here rather than compared as-is ────────────────────────────────
+ *
+ * `session.header.createdAt` is an epoch-millisecond **number** in every session on this machine
+ * (measured), but the field is not declared as a number, and a log that mixes numbers with ISO
+ * strings cannot be compared with `--since` at all — `1789…` and `"2026-09-27T…"` do not order
+ * against each other. Normalising once, at the source, keeps the later comparison honest.
+ *
+ * An unparseable value is `null` (loudly visible in the log) rather than a fallback timestamp:
+ * a fabricated creation time would silently admit exactly the sessions this gate exists to exclude,
+ * so the failure direction has to be "visible", never "plausible".
+ */
+function sessionCreatedAtOf(session) {
+  if (session === undefined || session === null) return null
+  const header = session.header
+  if (header === undefined || header === null || header.createdAt === undefined || header.createdAt === null) return null
+  const raw = header.createdAt
+  // Numeric epoch: seconds or milliseconds. Anything below ~1e11 is seconds (1e11 ms is 1973).
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    const ms = raw < 1e11 ? raw * 1000 : raw
+    const date = new Date(ms)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  if (typeof raw === 'string') {
+    const date = new Date(raw)
+    return Number.isNaN(date.getTime()) ? null : date.toISOString()
+  }
+  return null
+}
+
 function contextMessage(text) {
   return {
     id: randomUUID(),
@@ -1732,7 +1772,9 @@ export function apply(ctx, config) {
       if (step !== 1) return decision
       // A new turn starting means the previous one is over: flush it before measuring this one.
       // Keyed by session, so a concurrent conversation cannot settle this one's counts.
-      const sessionKey = sessionKeyOf(agent === undefined || agent === null ? undefined : agent.session)
+      const session = agent === undefined || agent === null ? undefined : agent.session
+      const sessionKey = sessionKeyOf(session)
+      const sessionCreatedAt = sessionCreatedAtOf(session)
       flush(sessionKey)
       const taskText = taskTextOf(messages).trim()
       if (taskText === '') return decision
@@ -1772,6 +1814,7 @@ export function apply(ctx, config) {
             tokensUsed: debugTokens ? result.effectiveTokens : undefined,
             debugTokens,
             sessionKey,
+            sessionCreatedAt,
           }),
         )
         // Appended to this step's claimed batch — not injected into the inbox.

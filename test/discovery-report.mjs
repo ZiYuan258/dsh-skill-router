@@ -35,7 +35,8 @@ const disc = (turn, tier, extra = {}) => {
   // firstEligible 默认 true：夹具里的每个回合都当"该会话的第一个 eligible"，这样主指标分母＝回合数，
   // 断言最直观；需要测"后续回合"时显式传 firstEligible: false。
   const firstEligible = extra.firstEligible !== undefined ? extra.firstEligible : arm !== 'not-eligible'
-  return JSON.stringify({ at: '2026-01-01T00:00:00.000Z', turn, step: 1, sessionKey: 'aaaa1111', tier, reason: 'ok', tokenCount: 3, effectiveTokenCount: 2, filteredCommonTokens: 1, ignoredTokenRatios: [1], indexRows: 1025, candidateCount: tier === 'NONE' ? 0 : 5, candidates: [], arm, injected, firstEligible, hintBytes: injected ? 330 : 0, ...extra })
+  const sessionCreatedAt = extra.sessionCreatedAt !== undefined ? extra.sessionCreatedAt : '2026-01-01T00:00:00.000Z'
+  return JSON.stringify({ at: '2026-01-01T00:00:00.000Z', turn, step: 1, sessionKey: 'aaaa1111', sessionCreatedAt, tier, reason: 'ok', tokenCount: 3, effectiveTokenCount: 2, filteredCommonTokens: 1, ignoredTokenRatios: [1], indexRows: 1025, candidateCount: tier === 'NONE' ? 0 : 5, candidates: [], arm, injected, firstEligible, hintBytes: injected ? 330 : 0, ...extra })
 }
 /** 一条回合计数记录。 */
 const call = (turn, search, load, extra = {}) => {
@@ -119,6 +120,30 @@ ok('坏行不影响其余记录', p6.paired.length === 1)
 // ── 7) indexRows 多个取值要报警（语料换过，跨它对比不可靠）────────────────────
 const s7 = summarise(pairTurns([disc(1, 'HIGH', { indexRows: 1025 }), call(1, 1, 1), disc(2, 'HIGH', { indexRows: 1028 }), call(2, 1, 1)].join('\n')))
 ok('多个 indexRows 取值被收集起来', s7.indexRows.length === 2 && s7.indexRows.includes(1025) && s7.indexRows.includes(1028), JSON.stringify(s7.indexRows))
+
+// ── 7b) 会话创建时间闸：主指标只收 T0 之后新建的会话 ──────────────────────────
+//
+// 这一条来自一个**协议级**污染：firstEligibleSeen 是插件进程内存，重启即清空，而 session 是持久、
+// 可 resume 的。所以"实验前就存在、重启后继续用"的会话，会把它的下一个 HIGH 呈现为"本会话第一个"。
+// 污染没消失，只是从跨回合变成了跨进程。闸门的判据是 sessionCreatedAt >= T0。
+const T0 = '2026-06-01T00:00:00.000Z'
+const aged = (turn, createdAt, extra = {}) => disc(turn, 'HIGH', { sessionCreatedAt: createdAt, ...extra })
+const gatePairs = pairTurns([
+  aged(1, '2026-07-01T00:00:00.000Z'), call(1, 1, 0),                        // T0 之后新建 → 合格
+  aged(2, '2026-01-01T00:00:00.000Z', { sessionKey: 'old11111' }), call(2, 1, 0, { sessionKey: 'old11111' }),  // T0 之前创建 → 排除
+  aged(3, null, { sessionKey: 'unk11111' }), call(3, 1, 0, { sessionKey: 'unk11111' }),                        // 时间未知 → 排除
+].join('\n'))
+const sGated = summarise(gatePairs, { since: T0 })
+ok('T0 之后新建的会话进入主指标', sGated.experiment.primary.sessions === 1, 'sessions=' + sGated.experiment.primary.sessions)
+ok('T0 之前创建的会话被排除', sGated.experiment.excludedPreT0 === 1, 'preT0=' + sGated.experiment.excludedPreT0)
+ok('创建时间未知的会话被排除（不放行）', sGated.experiment.excludedBirthUnknown === 1, 'unknown=' + sGated.experiment.excludedBirthUnknown)
+ok('闸门标记为开', sGated.experiment.birthGate === 'on')
+// 不给 T0 时闸门关闭，且**明确标记为 off**（报告会为此报警）
+const sOpen = summarise(gatePairs)
+ok('未给 T0 时闸门标记为关', sOpen.experiment.birthGate === 'off')
+ok('未给 T0 时三个会话都进主指标（闸门确实关着）', sOpen.experiment.primary.sessions === 3, 'sessions=' + sOpen.experiment.primary.sessions)
+// 排除只作用于**主指标**，探索性/全量仍可见（不该把数据藏起来）
+ok('被排除的会话仍出现在全量里', sGated.experiment.pooled.turns === 3, 'pooled=' + sGated.experiment.pooled.turns)
 
 // ── 8) CLI ────────────────────────────────────────────────────────────────────
 const dir = mkdtempSync(join(tmpdir(), 'report-'))

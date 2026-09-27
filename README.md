@@ -372,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.15.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -420,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.15.1 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -586,13 +586,46 @@ control 会话**从头到尾没有提示**，干预无法泄漏到它的任何�
 ```
 ① 重启 DSH，记下开始时间 T0
 ② 固定 skill-index（可用技能数应保持 1025；中途变了这批作废重来）
-③ 收集 ≥50 个**会话**，每个恰好一个合格的首观测（约各半）
-④ node tools/discovery-report.mjs --since <T0>
+③ **只接受 T0 之后新建的会话**——不要拿已有会话续跑
+④ 收集 ≥50 个**会话**，每个恰好一个合格的首观测（约各半）
+⑤ node tools/discovery-report.mjs --since <T0>
 ```
 
-注意第③条的门槛单位是**会话**，不是回合：需要 ≥50 个会话恰好各有一个可配对的首个 HIGH opportunity。
+注意第④条的门槛单位是**会话**，不是回合：需要 ≥50 个会话恰好各有一个可配对的首个 HIGH opportunity。
 
 `--since` 是必需的：旧记录没有 `sessionKey`，读数脚本会把它们报成"配对不可靠"，但**只有分析窗口才能把它们真正排除在分母外**。
+
+### 第③条为什么是硬性的：重启不是实验 reset
+
+`firstEligibleSeen` 是**插件进程内存**，重启 DSH 即清空。而 DSH 的 session 是**持久、可 resume** 的。两者相加会出现：
+
+```
+实验开始前   session A 已经被注入过 skill-router 提示
+     ↓
+重启 DSH     firstEligibleSeen 清空
+     ↓
+继续用 session A
+     ↓
+它的下一个 HIGH  →  firstEligible = true   ← 但 A 已有干预历史
+```
+
+**污染没有消失，只是从跨回合变成了跨进程。** 所以真正的实验 reset **不是重启，而是新建会话**。
+
+插件因此在每条记录上写 `sessionCreatedAt`（从 `session.header.createdAt` 归一化成 ISO 后落盘），读数脚本用 `--since <T0>` 把它当准入条件：
+
+```
+主指标 = 唯一 sessionKey
+       ∩ firstEligible === true
+       ∩ paired
+       ∩ sessionCreatedAt >= T0
+       ∩ armViolations === 0
+       ∩ duplicateFirsts === 0
+       ∩ indexRows 单一
+```
+
+**创建时间无法确认的会话一律排除**——这道闸存在的意义就是排除它，凭一个猜出来的时间放行等于没有闸。被排除的数量会在报告里分两类列出（T0 前创建 / 时间未知），**但不从探索性与全量里藏掉**。
+
+没给 `--since` 时闸门是关的，报告会明确报警。
 
 三个成功指标，按因果关系排序：**① HIGH 提示后 Agent 是否开始 `skill_search`**（验证触发假设）→ **② 搜到之后是否真的 `skill_load`**（验证候选产生了行为，而不只是被看了一眼）→ **③ 加载的技能与任务是否真的相关**（人工抽样）。
 

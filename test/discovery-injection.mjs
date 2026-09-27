@@ -126,7 +126,11 @@ function toolCall(name, session) {
 
 const highTask = 'Run a semgrep security audit on this repo'
 // 会话对象带 id：配对键是 (sessionKey, turn)，没有 id 就退化成 (unknown, turn)——那正是旧缺陷。
-const agentFor = (id) => ({ session: { id, header: { cwd: workspace } } })
+// header.createdAt 是 epoch 毫秒（真机实测形状），插件要把它归一化成 ISO 再落盘。
+//
+// 注意别写成 `agentFor(id, createdAt = 1789…)`：那样传 `undefined` 会触发**默认参数**，
+// 于是"测拿不到创建时间"的用例其实拿到了默认值——夹具自己把被测场景换掉了（这个坑我踩了）。
+const agentFor = (id, header) => ({ session: { id, header: header === undefined ? { cwd: workspace, createdAt: 1789000000000 } : header } })
 const agent = agentFor('session-one')
 const enter = (text) => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text }] }] })
 
@@ -206,6 +210,17 @@ ok('hintBytes 是实测的正数，且与真实提示长度一致', turn11 !== u
 const turn13 = lines().find((r) => r.turn === 13)
 ok('未注入的记录 hintBytes 为 0', turn13 !== undefined && turn13.hintBytes === 0 && turn13.injected === false, JSON.stringify(turn13 && { i: turn13.injected, b: turn13.hintBytes }))
 ok('记录里仍然没有用户原文', lines().every((r) => JSON.stringify(r).includes('security audit on') === false))
+// 会话创建时间必须**归一化成 ISO**：日志里混数字与 ISO 就无法和 --since 比较（1789… 与 "2026-…" 不可比）。
+ok('sessionCreatedAt 以 ISO 落盘（不是 epoch 数字）', turn11 !== undefined && /^\d{4}-\d{2}-\d{2}T/.test(String(turn11.sessionCreatedAt)), JSON.stringify(turn11 && turn11.sessionCreatedAt))
+ok('sessionCreatedAt 等于夹具的毫秒时间', turn11 !== undefined && turn11.sessionCreatedAt === new Date(1789000000000).toISOString(), JSON.stringify(turn11 && turn11.sessionCreatedAt))
+// 拿不到创建时间时必须是 null（可见），而不是伪造一个时间
+{
+  const noBirth = agentFor('session-no-birth', { cwd: workspace })
+  const t9 = enter(highTask)
+  await preStep({ agent: noBirth, messages: t9.messages, turn: 90, step: 1, signal: undefined }, t9)
+  const rec = lines().find((r) => r.turn === 90 && r.kind === undefined)
+  ok('创建时间拿不到时记 null（不伪造）', rec !== undefined && rec.sessionCreatedAt === null, JSON.stringify(rec && rec.sessionCreatedAt))
+}
 
 // ── 5) 每回合工具调用计数（在回合结束后写出）──────────────────────────────────
 // 时序必须与真实一致：**回合内先发生调用，下一个回合的 step 1 才 flush**。

@@ -117,7 +117,8 @@ export function pairTurns(text) {
 const calledSomething = (t) => (t.calls.skillSearchCalls ?? 0) + (t.calls.skillLoadCalls ?? 0) + (t.calls.skillRefCalls ?? 0) + (t.calls.residentSkillCalls ?? 0) > 0
 
 /** 汇总成报告对象。 */
-export function summarise(pairs) {
+export function summarise(pairs, options) {
+  const since = options === null || options === undefined ? undefined : options.since
   const tier = {}
   const reason = {}
   for (const t of pairs.discovery) {
@@ -147,7 +148,18 @@ export function summarise(pairs) {
     return { turns: list.length, calls: hits, rate: hits / list.length }
   }
   // 每个会话的第一个 eligible opportunity：整个读数的主指标就建立在这上面。
-  const firstPerSession = pairs.paired.filter((t) => t.firstEligible === true && (t.arm === 'treatment' || t.arm === 'control'))
+  //
+  // **但"第一个"还不够，会话本身必须是 T0 之后新建的。** `firstEligibleSeen` 是插件进程内存，
+  // 重启后清空；而 session 是持久、可 resume 的。所以一个**实验前就存在、重启后继续用**的会话，
+  // 可以把它的下一个 HIGH 呈现为"本会话第一个"——污染没有消失，只是从跨回合变成了跨进程。
+  //
+  // 这条闸只在给了 T0 时才生效（没有 T0 就没有可比的时刻），且**无法确认创建时间的会话一律排除**：
+  // 这道闸存在的意义就是排除它，凭一个猜出来的时间放行等于没有闸。
+  const createdAtOf = (t) => (typeof t.sessionCreatedAt === 'string' ? t.sessionCreatedAt : null)
+  const birthKnown = (t) => (createdAtOf(t) === null ? 'unknown' : createdAtOf(t) >= since ? 'ok' : 'pre-T0')
+  const firstCandidates = pairs.paired.filter((t) => t.firstEligible === true && (t.arm === 'treatment' || t.arm === 'control'))
+  const firstPerSession = since === undefined ? firstCandidates : firstCandidates.filter((t) => birthKnown(t) === 'ok')
+  const excludedByBirth = since === undefined ? [] : firstCandidates.filter((t) => birthKnown(t) !== 'ok')
   const laterPerSession = pairs.paired.filter((t) => t.firstEligible !== true && (t.arm === 'treatment' || t.arm === 'control'))
   const notEligible = pairs.paired.filter((t) => t.arm === 'not-eligible' || t.arm === null || t.arm === undefined)
   // 分配与执行是否一致：control 会话不该有 hint，treatment 会话不该没有。
@@ -187,6 +199,10 @@ export function summarise(pairs) {
       armViolations: armViolations.length,
       // 非零即为 bug：同一会话被记了两次 firstEligible，主指标的分母不可信。
       duplicateFirsts,
+      // 被"会话必须是 T0 之后新建"这道闸排除掉的首观测：分"实验前就存在"与"创建时间无法确认"。
+      birthGate: since === undefined ? 'off' : 'on',
+      excludedPreT0: excludedByBirth.filter((t) => birthKnown(t) === 'pre-T0').length,
+      excludedBirthUnknown: excludedByBirth.filter((t) => birthKnown(t) === 'unknown').length,
     },
     anyCall: pairs.paired.filter(calledSomething).length,
     hintBytes: pairs.paired.filter((t) => t.injected === true).map((t) => t.hintBytes ?? 0),
@@ -249,6 +265,14 @@ export function renderReport(summary) {
   if (e.armViolations > 0) lines.push('  ⚠️ 分配与实际注入不一致：' + e.armViolations + ' 处 —— 这批数据不能用来判断效果')
   else lines.push('  ' + pad('分配与实际注入一致：', 26) + '是（0 处冲突）')
   if (e.duplicateFirsts > 0) lines.push('  ⚠️ 有 ' + e.duplicateFirsts + ' 个会话被记了多次 firstEligible → 主指标分母不可信')
+  if (e.birthGate === 'off') {
+    lines.push('  ⚠️ **未给 --since：会话创建时间这道闸是关的。** 实验前就存在、重启后 resume 的会话')
+    lines.push('     可能把它的下一个 HIGH 当成"本会话第一个"。正式读数必须带 --since <T0>。')
+  } else {
+    lines.push('  ' + pad('会话创建于 T0 之后：', 26) + '是主指标的准入条件')
+    if (e.excludedPreT0 > 0) lines.push('  ' + pad('被排除（T0 前创建）：', 26) + e.excludedPreT0 + ' 个首观测')
+    if (e.excludedBirthUnknown > 0) lines.push('  ' + pad('被排除（创建时间未知）：', 26) + e.excludedBirthUnknown + ' 个首观测')
+  }
   lines.push('')
   if (e.primary.sessions < 50) {
     lines.push('结论：主指标只有 ' + e.primary.sessions + ' 个会话（需要 ≥50 个会话，各一个合格观测）。继续收集。')
@@ -281,7 +305,7 @@ export function main(argv, io) {
     }
     pairs.discovery = pairs.discovery.filter((t) => String(t.at ?? '') >= since)
   }
-  const summary = summarise(pairs)
+  const summary = summarise(pairs, { since })
   if (argv.includes('--json')) {
     process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
     return 0

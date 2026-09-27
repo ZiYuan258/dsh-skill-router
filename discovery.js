@@ -85,6 +85,14 @@ export function discoveryRecord(input) {
     // sessions that both reached turn 12 are the same row in this log (measured: 14 turn numbers
     // were duplicated across sessions before this field existed).
     sessionKey: typeof source.sessionKey === 'string' && source.sessionKey !== '' ? source.sessionKey : null,
+    // ISO creation time of the session, normalised from its header.
+    //
+    // The experiment admits only sessions **created after T0**, because `firstEligibleSeen` is process
+    // memory: after a restart, a resumed session can present its next HIGH opportunity as "its first".
+    // The contamination did not disappear when the arm moved to the session — it moved from across
+    // turns to across processes. `null` means the time could not be established, which is visible
+    // rather than faked; a fabricated time would silently admit exactly the sessions this excludes.
+    sessionCreatedAt: typeof source.sessionCreatedAt === 'string' && source.sessionCreatedAt !== '' ? source.sessionCreatedAt : null,
     tier: typeof result.tier === 'string' ? result.tier : 'NONE',
     reason: typeof result.reason === 'string' ? result.reason : 'unknown',
     // How many keywords the task yielded — and the two numbers that make the corpus filter legible:

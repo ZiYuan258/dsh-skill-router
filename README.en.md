@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.15.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.15.1 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -579,13 +579,46 @@ The plugin marks `firstEligible` on every record; the readout reports the primar
 ```
 ① restart DSH, record the start time T0
 ② freeze skill-index (usable skills should stay 1025; if it changes, this batch is void)
-③ collect >= 50 SESSIONS, each with exactly one pairable first observation (roughly half per arm)
-④ node tools/discovery-report.mjs --since <T0>
+③ **admit only sessions created after T0** — do not resume an existing session
+④ collect >= 50 SESSIONS, each with exactly one pairable first observation (roughly half per arm)
+⑤ node tools/discovery-report.mjs --since <T0>
 ```
 
-Note that step ③ counts **sessions**, not turns: the gate is 50 sessions each holding one pairable first HIGH opportunity.
+Note that step ④ counts **sessions**, not turns: the gate is 50 sessions each holding one pairable first HIGH opportunity.
 
 `--since` is required: legacy records have no `sessionKey` and are reported as "unreliable pairing", but **only the analysis window actually keeps them out of the denominator**.
+
+### Why step ③ is hard: a restart is not an experiment reset
+
+`firstEligibleSeen` is **plugin process memory** and is empty after a DSH restart, while a DSH session is **durable and resumable**. Together:
+
+```
+before the experiment   session A already received a skill-router hint
+     ↓
+restart DSH             firstEligibleSeen is cleared
+     ↓
+resume session A
+     ↓
+its next HIGH  ->  firstEligible = true   <- but A already has intervention history
+```
+
+**The contamination did not disappear — it moved from across turns to across processes.** So the real experiment reset is **a new session, not a restart**.
+
+The plugin therefore writes `sessionCreatedAt` on every record (normalised from `session.header.createdAt` to ISO), and the readout applies it as a gate under `--since <T0>`:
+
+```
+primary = unique sessionKey
+        ∩ firstEligible === true
+        ∩ paired
+        ∩ sessionCreatedAt >= T0
+        ∩ armViolations === 0
+        ∩ duplicateFirsts === 0
+        ∩ a single indexRows
+```
+
+**A session whose creation time cannot be established is excluded**, because admitting it on a guessed time defeats the gate this exists to be. Exclusions are reported in two classes (created before T0 / time unknown) and are **not hidden** from the exploratory and pooled numbers.
+
+With no `--since`, the gate is off and the readout says so.
 
 Three success metrics, in causal order: **① does the agent start calling `skill_search` after a HIGH hint** (the trigger hypothesis) → **② does it then actually `skill_load`** (the candidates produced behaviour, not just a glance) → **③ is the loaded skill relevant to the task** (manual sampling).
 
