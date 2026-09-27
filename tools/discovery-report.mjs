@@ -213,6 +213,49 @@ export function summarise(pairs, options) {
 }
 
 /**
+ * Fisher's exact test, two-tailed, for a 2x2 table.
+ *
+ * **为什么这个函数在工具里、而 p 值不在默认输出里。** 样本小时 Fisher exact 比正态近似稳妥，所以
+ * 最终分析需要它；但它**不是产品行为**——插件不该把某个检验绑进自己的输出，读者也不该在每一次
+ * 读数里看到一个会被误当成结论的 p 值。所以它默认不显示，只在显式 \`--fisher\` 时计算。
+ *
+ * 用对数阶乘避免大数溢出，并按"概率不高于观测表"累加（这是两尾的定义，不是把单尾乘二）。
+ *
+ * @returns p 值；任一格为负或行列为零时返回 null。
+ */
+export function fisherExact(a, b, c, d) {
+  const cells = [a, b, c, d]
+  if (cells.some((v) => typeof v !== 'number' || Number.isInteger(v) === false || v < 0)) return null
+  const r1 = a + b
+  const r2 = c + d
+  const c1 = a + c
+  const n = a + b + c + d
+  // 退化输入只有 n=0，以及"某一行或某一列全空"——那样概率算不出来（0/0）。
+  //
+  // **注意 c1===0（两臂都 0 次命中）不是退化输入。** 它是有效的观测结果，答案是 p=1：
+  // 观测到 0 vs 0 时没有证据反对"同一分布"。第一版把它当退化返回 null，那会让"两臂都没搜"
+  // 这个真实且可能出现的读数无法判断。对称的另一端（命中数拉满）本来就会给出极小 p。
+  if (n === 0 || r1 === 0 || r2 === 0) return null
+  const lnFact = (k) => {
+    let s = 0
+    for (let i = 2; i <= k; i += 1) s += Math.log(i)
+    return s
+  }
+  const lnChoose = (nn, kk) => lnFact(nn) - lnFact(kk) - lnFact(nn - kk)
+  const prob = (x) => Math.exp(lnChoose(r1, x) + lnChoose(n - r1, c1 - x) - lnChoose(n, c1))
+  const observed = prob(a)
+  let total = 0
+  const lo = Math.max(0, c1 - r2)
+  const hi = Math.min(r1, c1)
+  for (let x = lo; x <= hi; x += 1) {
+    const p = prob(x)
+    // 容差：浮点累加会让"与观测等概率"的表差出 1e-16 而被漏掉。
+    if (p <= observed * (1 + 1e-9)) total += p
+  }
+  return Math.min(1, total)
+}
+
+/**
  * Wilson score interval for a binomial proportion, at 95%.
  *
  * **为什么不用朴素正态近似**（\`p ± 1.96·sqrt(p(1-p)/n)\`）：在实验真正会遇到的取值上它会坏掉。
@@ -283,7 +326,9 @@ export function renderReport(summary) {
     const ci = e.primary.control.interval
     if (ti !== null && ci !== null) {
       const overlap = ti.low <= ci.high && ci.low <= ti.high
-      lines.push('  ' + pad('区间是否重叠：', 26) + (overlap ? '重叠 → **这个样本量还分不出差异**，别急着下结论' : '不重叠 → 差异方向可信（仍不是效应量估计）'))
+      // 措辞要小心：区间重叠与否是**描述**，不是检验。上一版写成"差异方向可信"容易被当成
+      // 显著性结论，所以这里明确说它替代不了检验，并指向下面的 2×2 表。
+      lines.push('  ' + pad('区间是否重叠：', 26) + (overlap ? '重叠 → 这个样本量还分不出差异，别急着下结论' : '不重叠（**描述性**：不是显著性检验，正式判断请用下面的 2×2 表做 Fisher exact）'))
     }
     if (e.primary.treatment.turns < 20 || e.primary.control.turns < 20) {
       lines.push('  ' + pad('', 26) + '⚠️ 某一臂 n<20，区间会很宽——这是"信息不足"，不是"没有效果"')
@@ -303,7 +348,28 @@ export function renderReport(summary) {
   lines.push(condLine('control：', e.primary.control))
   lines.push('  ' + pad('全漏斗（分母＝全部首观测）：', 30) + 'treatment ' + pct(e.primary.treatment.load.rate) + '，control ' + pct(e.primary.control.load.rate))
   lines.push('')
-  lines.push('③ 候选相关性（HIGH 的 top-5 里至少一个明显相关）')
+  lines.push('③ 原始 2×2 表（最终分析用这些整数，不要在插件里做检验）')
+  // 只印原始计数。**不在这里算 p 值**：检验属于分析阶段，工具该做的是把原始整数如实交出来，
+  // 而不是把某个检验绑进产品代码。样本小时 Fisher exact 比正态近似稳妥，它由分析者自行运行。
+  const cell = (arm, field) => arm
+  const t2 = e.primary.treatment
+  const c2 = e.primary.control
+  lines.push('  ' + pad('', 20) + 'search'.padEnd(10) + 'no search'.padEnd(12) + 'total')
+  lines.push('  ' + pad('treatment', 20) + String(t2.calls).padEnd(10) + String(t2.misses).padEnd(12) + t2.turns)
+  lines.push('  ' + pad('control', 20) + String(c2.calls).padEnd(10) + String(c2.misses).padEnd(12) + c2.turns)
+  if (t2.turns > 0 && c2.turns > 0) {
+    lines.push('  ' + pad('（一行可复制：', 20) + 'a=' + t2.calls + ' b=' + t2.misses + ' c=' + c2.calls + ' d=' + c2.misses + '）')
+  } else {
+    lines.push('  （两臂都有样本后才给出可复制的四个整数。）')
+  }
+  const lt = t2.loadGivenSearch
+  const lc = c2.loadGivenSearch
+  lines.push('  ' + pad('', 20) + 'load'.padEnd(10) + 'no load'.padEnd(12) + 'total')
+  lines.push('  ' + pad('treatment|search', 20) + String(lt.calls).padEnd(10) + String(lt.misses).padEnd(12) + lt.turns)
+  lines.push('  ' + pad('control|search', 20) + String(lc.calls).padEnd(10) + String(lc.misses).padEnd(12) + lc.turns)
+  lines.push('  ' + pad('（条件在"搜过"上；分母为 0 时不给表。）', 20))
+  lines.push('')
+  lines.push('④ 候选相关性（HIGH 的 top-5 里至少一个明显相关）—— 人工抽样')
   lines.push('  **这个脚本算不出来，必须人工抽样。** 且它是前置门槛：相关性不过关时，①② 的差值没有解释力。')
   lines.push('')
   lines.push('── 参考：不独立、不能用来下结论的数字 ──')
@@ -366,6 +432,29 @@ export function main(argv, io) {
     return 0
   }
   log(renderReport(summary))
+  if (argv.includes('--fisher')) {
+    const t2 = summary.experiment.primary.treatment
+    const c2 = summary.experiment.primary.control
+    if (t2.turns === 0 || c2.turns === 0) {
+      log('')
+      log('Fisher exact：两臂都还没有样本，无法计算。')
+    } else {
+      const p = fisherExact(t2.calls, t2.misses, c2.calls, c2.misses)
+      log('')
+      log('Fisher exact（两尾，搜索率，仅在你显式要求时计算）：')
+      log('  表 a=' + t2.calls + ' b=' + t2.misses + ' c=' + c2.calls + ' d=' + c2.misses)
+      log('  p = ' + (p === null ? 'n/a' : p.toExponential(3)))
+      const lt = t2.loadGivenSearch
+      const lc = c2.loadGivenSearch
+      if (lt.turns > 0 && lc.turns > 0) {
+        const pl = fisherExact(lt.calls, lt.misses, lc.calls, lc.misses)
+        log('Fisher exact（两尾，条件加载率）：')
+        log('  表 a=' + lt.calls + ' b=' + lt.misses + ' c=' + lc.calls + ' d=' + lc.misses)
+        log('  p = ' + (pl === null ? 'n/a' : pl.toExponential(3)))
+      }
+      log('  ⚠️ 一次读数里的多重比较不做校正。p 只回答"这一批数据像不像同一分布"，不是效应量。')
+    }
+  }
   if (argv.includes('--show-tokens')) {
     // 只有在 debug 开关打开过的日志里才有内容。默认不打印。
     const withTokens = pairs.discovery.filter((t) => Array.isArray(t.ignoredTokens) && t.ignoredTokens.length > 0)

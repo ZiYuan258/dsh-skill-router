@@ -20,7 +20,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { main, pairKey, pairTurns, summarise, wilsonInterval } from '../tools/discovery-report.mjs'
+import { fisherExact, main, pairKey, pairTurns, summarise, wilsonInterval } from '../tools/discovery-report.mjs'
 
 const problems = []
 const ok = (label, passed, detail) => {
@@ -173,12 +173,16 @@ ok('两个分母不同，所以两个数都报', cond.loadGivenSearch.rate !== c
 const none = summarise(pairTurns([disc(1, 'HIGH'), call(1, 0, 0)].join('\n'))).experiment.primary.treatment
 ok('无人搜索时条件率 n=0 且 rate 为 null（不是 0%）', none.loadGivenSearch.turns === 0 && none.loadGivenSearch.rate === null, JSON.stringify(none.loadGivenSearch))
 
-// ── 8) CLI ────────────────────────────────────────────────────────────────────
+// CLI 夹具（7d 与 8 都要用，所以先定义）
 const dir = mkdtempSync(join(tmpdir(), 'report-'))
 const logPath = join(dir, 'discovery.jsonl')
 const QUIET = { log() {}, error() {} }
-ok('日志不存在时退出码 2', main(['--log', join(dir, 'nope.jsonl')], QUIET) === 2)
-writeFileSync(logPath, [disc(1, 'HIGH'), call(1, 2, 1)].join('\n'), 'utf8')
+/**
+ * 跑一次 CLI 并收集输出。
+ *
+ * **两条路都要抓**，这是第一版漏掉的：`--json` 直写 `process.stdout`，而**文本模式走 `io.log`**。
+ * 第一版只 mock 了 stdout，于是文本模式的断言全部拿到空字符串——一个"表没出现"的假失败。
+ */
 const capture = (argv) => {
   const chunks = []
   const realWrite = process.stdout.write.bind(process.stdout)
@@ -186,10 +190,46 @@ const capture = (argv) => {
     chunks.push(chunk)
     return true
   }
-  const code = main(argv, QUIET)
+  const code = main(argv, { log: (m) => chunks.push(String(m) + '\n'), error: (m) => chunks.push(String(m) + '\n') })
   process.stdout.write = realWrite
   return { code, text: chunks.join('') }
 }
+writeFileSync(logPath, [disc(1, 'HIGH'), call(1, 2, 1)].join('\n'), 'utf8')
+
+// ── 7d) Fisher exact：工具在手，但**默认不出现**在输出里 ────────────────────────
+//
+// 用户的要求：不要改插件去做检验，正式分析时用 2×2 表跑 Fisher exact，因为样本小时它比正态近似
+// 稳妥。所以这里钉两件事：实现是对的，以及它**不会**混进默认读数（一个每次读数都出现的 p 值很容易
+// 被当成结论）。
+ok('Fisher：教科书例子 3/3 vs 0/3 → p=0.1', (() => { const p = fisherExact(3, 0, 0, 3); return Math.abs(p - 0.1) < 1e-9 })(), String(fisherExact(3, 0, 0, 3)))
+ok('Fisher：无差异时 p=1（5/25 vs 5/25）', Math.abs(fisherExact(5, 20, 5, 20) - 1) < 1e-9, String(fisherExact(5, 20, 5, 20)))
+ok('Fisher：两臂全零时 p=1（不是 NaN）', fisherExact(0, 25, 0, 25) === 1, String(fisherExact(0, 25, 0, 25)))
+ok('Fisher：20/25 vs 4/25 给出极小 p', fisherExact(20, 5, 4, 21) < 1e-4, String(fisherExact(20, 5, 4, 21)))
+ok('Fisher：8/25 vs 5/25 给出"看不出来"的 p（>0.05）', fisherExact(8, 17, 5, 20) > 0.05, String(fisherExact(8, 17, 5, 20)))
+ok('Fisher：p 永远 <= 1', [fisherExact(1, 1, 1, 1), fisherExact(25, 0, 0, 25)].every((p) => p <= 1))
+ok('Fisher：非法输入返回 null 而不是 NaN', fisherExact(-1, 2, 3, 4) === null && fisherExact(1.5, 2, 3, 4) === null)
+ok('Fisher：空表返回 null', fisherExact(0, 0, 0, 0) === null)
+// 默认读数里不能有 p 值。**用独立夹具**，两臂各一个合格观测——共享夹具只有一个会话，
+// 两臂不会都有样本，2×2 表就只会显示一行（第一版因此误判"表没出现"）。
+const twoArmLog = join(dir, 'two-arm.jsonl')
+writeFileSync(twoArmLog, [
+  disc(1, 'HIGH', { arm: 'treatment' }), call(1, 2, 1, { arm: 'treatment' }),
+  disc(2, 'HIGH', { arm: 'control', injected: false, sessionKey: 'bbbb2222' }), call(2, 0, 0, { arm: 'control', injected: false, sessionKey: 'bbbb2222' }),
+].join('\n'), 'utf8')
+const noFisher = capture(['--log', twoArmLog]).text
+ok('默认读数含原始 2×2 表', /原始 2×2 表/.test(noFisher) && /a=2 b=1/.test(noFisher) === false ? /原始 2×2 表/.test(noFisher) : false, '')
+ok('默认读数不含 p 值（检验不在产品输出里）', /Fisher exact|p = /.test(noFisher) === false, '')
+const withFisher = capture(['--log', twoArmLog, '--fisher']).text
+ok('显式 --fisher 才出现 p 值', /Fisher exact/.test(withFisher) && /p = /.test(withFisher))
+// 表里的四个整数必须与读数里 2×2 表那一行一致：夹具是每臂各一个会话（treatment 搜了 2 次、
+// control 没搜），所以是 a=1 b=0 c=0 d=1。第一版我按"搜了 2 次"误写成 a=2——**计数是会话数，
+// 不是调用次数**，这正是主指标的定义。
+ok('--fisher 的表与读数里的 2×2 行一致', /a=1 b=0 c=0 d=1/.test(withFisher), (withFisher.match(/a=\d+ b=\d+ c=\d+ d=\d+/) || [''])[0])
+ok('--fisher 的 p 值可读（1 次 vs 0 次看不出差异）', /p = 1\.000e\+0/.test(withFisher), (withFisher.match(/p = [\d.e+-]+/) || [''])[0])
+// 条件加载率那一侧的 p 只在两臂都真的搜过时才给——control 没搜过就不该硬算
+ok('某臂没搜过时不给条件加载率的 p（不硬算）', /Fisher exact（两尾，条件加载率）/.test(withFisher) === false)
+
+// ── 8) CLI ────────────────────────────────────────────────────────────────────
 const run = capture(['--log', logPath, '--json'])
 ok('--json 退出码 0', run.code === 0)
 const payload = JSON.parse(run.text)
