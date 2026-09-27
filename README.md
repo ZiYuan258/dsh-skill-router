@@ -372,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.13.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.14.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -420,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.13.1 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.14.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -514,16 +514,59 @@ Load any that fit with skill_load, or ignore this and continue without one.
 ### 遥测现在记两件事，因为它们回答的是两个问题
 
 ```json
-{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":1028,
- "candidateCount":5,"candidates":[…],"injected":true,"hintBytes":206}
+{"at":"…","turn":3,"step":1,"tier":"HIGH","reason":"ok","tokenCount":7,"indexRows":1025,
+ "candidateCount":5,"candidates":[…],"arm":"treatment","injected":true,"hintBytes":330}
 
-{"at":"…","kind":"turn-calls","turn":3,"tier":"HIGH","injected":true,
+{"at":"…","kind":"turn-calls","turn":3,"tier":"HIGH","arm":"treatment","injected":true,
  "skillSearchCalls":1,"skillLoadCalls":1,"skillRefCalls":0,"residentSkillCalls":0,"otherToolCalls":7}
 ```
 
-**第一条写在 `step === 1`，那时谁也不知道这一回合会不会去搜**——所以"提示有没有让 Agent 去搜"必须由第二条回答，两条靠 `turn` 对齐。第二类记录只记**计数**：没有工具参数、没有技能正文、没有用户原文。
+**第一条写在 `step === 1`，那时谁也不知道这一回合会不会去搜**——所以"提示有没有让 Agent 去搜"必须由第二条回答，两条靠 **`(sessionKey, turn)`** 对齐（不是 `turn`：实测有 14 个 turn 号跨会话重复）。第二类记录只记**计数**：没有工具参数、没有技能正文、没有用户原文。
 
 按回合的计数是在**下一个回合的第一步**结算的，因为这个 harness 里没有可挂的回合结束瀑布（已核实：`agent/turn-stopping` 在 `0.1.7-rc.2` 里不存在，挂上去会是"永不执行的埋点"）。因中止/崩溃而未结算的回合，其数字是**丢失**而不是错记——对一次测量来说这是正确的失败方向。
+
+### 随机分臂：为什么"未注入"不是对照
+
+曾经把"未注入"的回合当成对照组。**那不是对照。** 注入与否由 `tier` 决定，所以两组在构造上就是不同的任务总体：
+
+```
+注入组： 做 Semgrep 安全审计     → 候选明确 → injected=true
+"对照"： 今天天气怎么样          → 没有候选 → injected=false
+```
+
+两组的搜索率之差说明不了提示的作用——**任何差异都可以归因于任务本身不同**。
+
+真正要回答的问题窄得多，只有随机分臂能答：
+
+> **在系统已经认为候选质量很高的同一类任务里，仅仅把候选摆出来，会不会改变 Agent 的行为？**
+
+所以 `tier === HIGH` 之后再随机决定：
+
+```
+HIGH opportunity
+      ↓
+sha256(sessionKey + ":" + turn) → 约 50/50
+   ↙                    ↘
+control               treatment
+不注入                 注入提示
+```
+
+**为什么用哈希而不是随机数**：同一会话在重试或重放时不会翻臂；没有 RNG 状态要持久化；没有任何关于用户或任务的信息参与选择（只有一个已经哈希过的标识符）；分臂可以从日志完全复现。
+
+**为什么按回合而不是按会话**：两臂因此抽自**同一个会话**，能力、工具、上下文都匹配，只有提示这一项在变。按会话随机会让分臂与"这个会话恰好有多强"混在一起。
+
+**代价要说清**：一半的 HIGH 机会**拿不到提示**。如果提示确实有效，这个实验就是在运行期间主动对那一半回合扣掉一个有效帮助——这是"要因果答案而不是相关答案"的代价，所以它是所有人明示的决定，不是悄悄设的默认值。
+
+### 实验协议
+
+```
+① 重启 DSH，记下开始时间 T0
+② 固定 skill-index（可用技能数应保持 1025；中途变了这批作废重来）
+③ 收集 ≥50 个唯一、可配对的 HIGH opportunity（约各半）
+④ node tools/discovery-report.mjs --since <T0>
+```
+
+`--since` 是必需的：旧记录没有 `sessionKey`，读数脚本会把它们报成"配对不可靠"，但**只有分析窗口才能把它们真正排除在分母外**。
 
 三个成功指标，按因果关系排序：**① HIGH 提示后 Agent 是否开始 `skill_search`**（验证触发假设）→ **② 搜到之后是否真的 `skill_load`**（验证候选产生了行为，而不只是被看了一眼）→ **③ 加载的技能与任务是否真的相关**（人工抽样）。
 
@@ -575,7 +618,7 @@ npm test
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
-| `discovery-report.mjs` | **实验读数脚本**（`node tools/discovery-report.mjs`）：把遥测汇总成三个指标，并且**把"未知"与"0 次"严格分开**——按回合的计数天生右截断（回合结束才在下一回合落盘），未配对的回合必须报成 unknown 而不是 search=0，否则上升的搜索率会被算成没变化；配对键是 **`(sessionKey, turn)`** 而不是 `turn`（实测 14 个 turn 号跨会话重复），且按回合**真正去重**（多条发现记录取最后一条、多条计数记录逐项求和，否则同一回合会在分子分母里各算两次）；无会话标签的旧记录单独计数；坏行不吞掉；`indexRows` 出现多个取值时报警（语料换过）；token 文本默认不打印 |
+| `discovery-report.mjs` | **实验读数脚本**（`node tools/discovery-report.mjs`）：按**随机分臂**汇总实验（treatment vs control，而不是"注入 vs 未注入"——后者是不同任务总体），并，并且**把"未知"与"0 次"严格分开**——按回合的计数天生右截断（回合结束才在下一回合落盘），未配对的回合必须报成 unknown 而不是 search=0，否则上升的搜索率会被算成没变化；配对键是 **`(sessionKey, turn)`** 而不是 `turn`（实测 14 个 turn 号跨会话重复），且按回合**真正去重**（多条发现记录取最后一条、多条计数记录逐项求和，否则同一回合会在分子分母里各算两次）；无会话标签的旧记录单独计数；坏行不吞掉；`indexRows` 出现多个取值时报警（语料换过）；token 文本默认不打印 |
 | `discovery-ranking.mjs` | **候选生成器的质量护栏**：语料频率过滤（全库都有的词不得参与评分、`corpusFrequency` 如实报道比例、阈值边界 80% 保留 / >80% 丢弃、全部无判别力时给 `no-discriminating-token`）、按技能名去重（同名只占一个名额、保留最高分）、**tier 在去重后的有效 token 上计算**（100% 词不能伪造 HIGH）、真正的强候选仍是 HIGH；有真库时抽样验证 `skill`/`skills` 确为 100% 词、且安全审计任务把 `semgrep` 排第一、代码审查任务把 `code-review` 类排前、候选名不重复 |
 | `discovery-injection.mjs` | 发现层的接线（**HIGH 注入 + 每回合工具计数**）：注入只发生在 `tier === HIGH` 且 `step === 1`、注入消息形状合法（`role`/`content`/`source`/**唯一 `id`**）、两次注入 id 不同、`step=2` 与 NONE 不注入、原文消息未被改动；遥测如实记 `injected` 与**实测** `hintBytes`；工具调用**在回合结束后**按回合计数（三个技能工具各记、原生 `skill` 单独记、其它工具只汇总），且计数按回合归零、记录里没有工具参数与正文 |
 | `build-index.mjs` | 索引生成器：**每一行都按插件的路径规则解析到真实存在的 `SKILL.md`**（第一版 `relpath` 多套了一层 `repo/`，行数 1028 = 1028 却 0 行可解析——计数检查抓不到这种错）、`.git`/`node_modules` 被跳过、BOM/CRLF/块标量/缺 name/缺 description 各形状、制表符与引号的 TSV 转义、`whenToUse` 只在需要时写第 7 列、CLI 的 `--check` 三态与 CRLF 不算过期；有真库时逐行复核并与现有索引比键集合 |

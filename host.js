@@ -1514,6 +1514,33 @@ function taskTextOf(messages) {
   return parts.join('\n')
 }
 
+/** Share of eligible HIGH opportunities assigned to the control arm (no hint). */
+const CONTROL_SHARE = 0.5
+
+/**
+ * Which arm of the experiment a HIGH opportunity falls into: `'treatment'` or `'control'`.
+ *
+ * Exported because it is the single most important thing to be able to test about this experiment:
+ * if the split were biased, or not deterministic, every number the readout produces would be
+ * meaningless while still looking plausible.
+ *
+ * `sha256(sessionKey + ':' + turn)` rather than a random number, so that:
+ *   * one conversation cannot flip arms on a retry or a replayed step;
+ *   * there is no RNG state to persist;
+ *   * nothing about the user or the task enters the choice — only an identifier already hashed
+ *     beyond recovery;
+ *   * the split is reproducible from the log alone.
+ *
+ * Per turn rather than per session, deliberately: both arms then draw from the *same* conversation,
+ * so capabilities, tools and context are matched and only the hint varies. Session-level
+ * randomisation would confound the arm with "how capable this conversation happened to be".
+ */
+export function experimentArmOf(sessionKey, turn) {
+  const digest = createHash('sha256').update(String(sessionKey) + ':' + String(turn)).digest('hex')
+  // First 8 hex digits -> [0,1); 16^8 is far above the precision a coin flip needs.
+  return parseInt(digest.slice(0, 8), 16) / 0x100000000 < CONTROL_SHARE ? 'control' : 'treatment'
+}
+
 /** The one-line hint. Names and matched fields only — the byte budget is the design. */
 function discoveryHint(result) {
   const parts = result.candidates.map((c) => (c.fields.length === 0 ? c.name : c.name + ' (' + c.fields.join(', ') + ')'))
@@ -1580,6 +1607,42 @@ export function apply(ctx, config) {
   // and the three tool schemas ~1,001, while a five-name hint measures 329–341 bytes (~91–95 tokens)
   // on the real library. An earlier note said ~57; that came from short sample names and was wrong.
   const INJECT_TIERS = new Set(['HIGH'])
+
+  /**
+   * Which arm of the experiment a HIGH opportunity falls into.
+   *
+   * ── why a randomised control arm exists at all ──────────────────────────────────────────
+   *
+   * The first version of this measurement compared `tier === HIGH` turns against everything else and
+   * called the latter a control group. It is not one. Injection is decided *by* the tier, so the two
+   * groups were different task populations by construction — "run a semgrep security audit" against
+   * "what is the weather". A difference in search rate between them says nothing about the hint.
+   *
+   * The question is narrower, and only a randomised arm answers it: **among tasks the system already
+   * considers high quality, does merely showing the candidates change what the agent does?** Both
+   * arms are HIGH, both are computed identically, and the only difference is whether the hint is
+   * appended to the step.
+   *
+   * ── why a hash and not a random number ──────────────────────────────────────────────────
+   *
+   * `sha256(sessionKey + ':' + turn)` is deterministic, so:
+   *   * one conversation cannot flip arms on a retry or a replayed step;
+   *   * there is no RNG state to persist anywhere;
+   *   * nothing about the user or the task enters the choice — only an identifier already hashed
+   *     beyond recovery;
+   *   * the split is reproducible from the log, so the readout can re-derive an arm if a record
+   *     predates the field.
+   *
+   * Per turn rather than per session, deliberately: both arms then draw from the *same* conversation,
+   * so capabilities, tools and context are matched and only the hint varies. Session-level
+   * randomisation would confound the arm with "how capable this conversation happened to be".
+   *
+   * ── the cost, stated plainly ────────────────────────────────────────────────────────────
+   *
+   * Half of all HIGH opportunities get **no hint**. If the hint is effective, this experiment
+   * actively withholds a working aid from those turns for as long as it runs — the price of a causal
+   * answer instead of a correlated one. That is a decision for the owner, not a silent default.
+   */
   // Writing the task's own keywords to disk off by default: a keyword can carry a project, a
   // customer or a vulnerability name. `ctx.config` first (so a patch row can set it) with an env
   // var as the fallback, because whether cordis hands a mounted row its config is not something
@@ -1632,7 +1695,7 @@ export function apply(ctx, config) {
       if (done === undefined) return
       perSession.delete(sessionKey)
       try {
-        recorder.write(turnCallsRecord({ turn: done.turn, sessionKey, tier: done.tier, injected: done.injected, calls: done.calls, otherToolCalls: done.other }))
+        recorder.write(turnCallsRecord({ turn: done.turn, sessionKey, tier: done.tier, injected: done.injected, arm: done.arm, calls: done.calls, otherToolCalls: done.other }))
       } catch {
         /* telemetry is never worth a failed turn */
       }
@@ -1662,9 +1725,14 @@ export function apply(ctx, config) {
         const started = Date.now()
         const cwd = agent === undefined || agent === null ? '' : String(agent.session.header.cwd ?? '')
         const result = await router.discover(taskText, cwd, signal)
-        const inject = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
+        // Eligible means "the system considers this high quality". The arm is then drawn from the
+        // hash, and ONLY that decides whether the hint goes out — so both arms are the same kind of
+        // task by construction, which is what the earlier HIGH-vs-everything-else comparison lacked.
+        const eligible = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
+        const arm = eligible ? experimentArmOf(sessionKey, turn) : 'not-eligible'
+        const inject = eligible && arm === 'treatment'
         const hint = inject ? discoveryHint(result) : ''
-        perSession.set(sessionKey, { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, calls: {}, other: 0 })
+        perSession.set(sessionKey, { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, arm, calls: {}, other: 0 })
         recorder.write(
           discoveryRecord({
             turn,
@@ -1673,6 +1741,9 @@ export function apply(ctx, config) {
             elapsedMs: Date.now() - started,
             indexRows: result.indexRows,
             injected: inject,
+            // `arm` is the assignment, `injected` is what actually happened. Kept as two fields so a
+            // control turn that somehow carried a hint would be visible rather than invisible.
+            arm,
             // Measured, not estimated: the case for injecting rests on this number being small.
             hintBytes: Buffer.byteLength(hint, 'utf8'),
             tokensUsed: debugTokens ? result.effectiveTokens : undefined,

@@ -124,31 +124,39 @@ export function summarise(pairs) {
     tier[t.tier] = (tier[t.tier] ?? 0) + 1
     reason[t.reason] = (reason[t.reason] ?? 0) + 1
   }
-  // 注入率：只对已经结束的回合有意义，否则会低估（正在进行的回合还没结算）。
-  const injectable = pairs.paired.filter((t) => t.injected === true)
-  const searchAfter = injectable.filter((t) => (t.calls.skillSearchCalls ?? 0) > 0)
-  const loadAfter = injectable.filter((t) => (t.calls.skillLoadCalls ?? 0) > 0)
-  // 对照：未注入的 paired 回合里有多少搜过（这是"注入是否改变行为"的分母）
-  const notInjected = pairs.paired.filter((t) => t.injected !== true)
-  const searchWithout = notInjected.filter((t) => (t.calls.skillSearchCalls ?? 0) > 0)
+  // ── 分臂统计：这是实验的核心读数 ──────────────────────────────────────────────
+  //
+  // **为什么不能拿"未注入"当对照。** 注入与否由 tier 决定，所以"注入组"与"未注入组"在构造上就是
+  // 不同的任务总体（"做 Semgrep 安全审计" vs "今天天气怎么样"）。两组搜索率之差说明不了提示的作用。
+  //
+  // 真正的对照是**同一类任务**（都是 HIGH、候选质量相同）里被随机分到 control 的那些回合。所以
+  // 下列所有比率都按 `arm` 分，而 `injected` 只在核对"分配是否被真正执行"时用。
+  //
+  // 分臂只统计 **arm 为 treatment/control 的 paired 回合**；`not-eligible` 与非 HIGH 的一律不进，
+  // 否则又会把不同任务总体混进来——那正是这一版要修掉的错误。
+  const byArm = (arm) => pairs.paired.filter((t) => t.arm === arm)
+  const rate = (list, field) => {
+    if (list.length === 0) return { pairedTurns: 0, calls: 0, rate: null }
+    const hits = list.filter((t) => (t.calls[field] ?? 0) > 0).length
+    return { pairedTurns: list.length, calls: hits, rate: hits / list.length }
+  }
+  const treatment = byArm('treatment')
+  const control = byArm('control')
+  const notEligible = pairs.paired.filter((t) => t.arm === 'not-eligible' || t.arm === null || t.arm === undefined)
+  // 分配与执行是否一致：control 回合不该有 hint，treatment 回合不该没有。
+  const armViolations = pairs.paired.filter((t) => (t.arm === 'control' && t.injected === true) || (t.arm === 'treatment' && t.injected !== true))
   return {
     records: { discovery: pairs.discovery.length, turnCalls: pairs.calls.size, paired: pairs.paired.length, unpaired: pairs.unpaired.length, malformed: pairs.malformed, legacy: pairs.legacy === undefined ? 0 : pairs.legacy.length },
     tier,
     reason,
-    injected: {
-      // **可配对的**注入回合数，即下面所有比率的分母。名字里带 paired，否则会被读成
-      // "所有注入回合"——而其中未结算的那些是 unknown，不是 0。
-      pairedTurns: injectable.length,
-      // **paired 才作分母。** unpaired 的回合是 unknown，不是 0。
-      searchCalls: searchAfter.length,
-      loadCalls: loadAfter.length,
-      searchRate: injectable.length === 0 ? null : searchAfter.length / injectable.length,
-      loadRate: injectable.length === 0 ? null : loadAfter.length / injectable.length,
-    },
-    notInjected: {
-      pairedTurns: notInjected.length,
-      searchCalls: searchWithout.length,
-      searchRate: notInjected.length === 0 ? null : searchWithout.length / notInjected.length,
+    experiment: {
+      treatment: { ...rate(treatment, 'skillSearchCalls'), load: rate(treatment, 'skillLoadCalls') },
+      control: { ...rate(control, 'skillSearchCalls'), load: rate(control, 'skillLoadCalls') },
+      notEligiblePairedTurns: notEligible.length,
+      // 非零即为 bug：说明分配与实际注入不一致，这批数据不能用来判断效果。
+      armViolations: armViolations.length,
+      // 门槛：唯一、可配对的 HIGH opportunity 数（treatment + control）。
+      eligiblePairedTurns: treatment.length + control.length,
     },
     anyCall: pairs.paired.filter(calledSomething).length,
     hintBytes: pairs.paired.filter((t) => t.injected === true).map((t) => t.hintBytes ?? 0),
@@ -179,23 +187,34 @@ export function renderReport(summary) {
   lines.push('reason 分布：')
   for (const [k, n] of Object.entries(summary.reason).sort((a, b) => b[1] - a[1])) lines.push('  ' + pad(k, 26) + n)
   lines.push('')
-  lines.push('── 三个指标（分母只算可配对的回合）──')
+  lines.push('── 实验：同一个 HIGH 总体里的随机分臂 ──')
   lines.push('')
-  lines.push('① 注入 → Agent 是否开始 skill_search')
-  lines.push('  ' + pad('注入的回合：', 22) + summary.injected.pairedTurns + '（可配对的）')
-  lines.push('  ' + pad('其中搜了：', 22) + summary.injected.searchCalls + '  → ' + pct(summary.injected.searchRate))
-  lines.push('  ' + pad('对照（未注入）：', 22) + summary.notInjected.pairedTurns + ' 个回合，其中 ' + summary.notInjected.searchCalls + ' 个搜了 → ' + pct(summary.notInjected.searchRate))
+  const e = summary.experiment
+  lines.push('① 提示 → Agent 是否开始 skill_search（**核心指标**）')
+  lines.push('  ' + pad('treatment（有提示）：', 26) + e.treatment.pairedTurns + ' 个回合，' + e.treatment.calls + ' 个搜了 → ' + pct(e.treatment.rate))
+  lines.push('  ' + pad('control（无提示）：', 26) + e.control.pairedTurns + ' 个回合，' + e.control.calls + ' 个搜了 → ' + pct(e.control.rate))
+  if (e.treatment.rate !== null && e.control.rate !== null) {
+    const delta = (e.treatment.rate - e.control.rate) * 100
+    lines.push('  ' + pad('差值：', 26) + (delta >= 0 ? '+' : '') + delta.toFixed(1) + ' 个百分点')
+  }
   lines.push('')
-  lines.push('② 搜到 → 是否真的 skill_load')
-  lines.push('  ' + pad('注入的回合里加载了：', 22) + summary.injected.loadCalls + '  → ' + pct(summary.injected.loadRate))
+  lines.push('② search → skill_load（两组分别看）')
+  lines.push('  ' + pad('treatment 里加载了：', 26) + e.treatment.load.calls + ' → ' + pct(e.treatment.load.rate))
+  lines.push('  ' + pad('control 里加载了：', 26) + e.control.load.calls + ' → ' + pct(e.control.load.rate))
   lines.push('')
   lines.push('③ 候选相关性（HIGH 的 top-5 里至少一个明显相关）')
-  lines.push('  **这个脚本算不出来，必须人工抽样。** 见下面。')
+  lines.push('  **这个脚本算不出来，必须人工抽样。** 且它是前置门槛：相关性不过关时，①② 的差值没有解释力。')
   lines.push('')
-  if (summary.injected.pairedTurns < 50) {
-    lines.push('结论：可配对的注入回合只有 ' + summary.injected.pairedTurns + ' 个，还不到 50 的质量门槛。继续收集。')
+  lines.push(pad('非合格回合（不进分臂）：', 26) + e.notEligiblePairedTurns + '（NONE/MEDIUM 或旧记录）')
+  if (e.armViolations > 0) lines.push('  ⚠️ 分配与实际注入不一致的回合：' + e.armViolations + ' —— 这批数据不能用来判断效果')
+  else lines.push('  ' + pad('分配与实际注入一致：', 26) + '是（0 处冲突）')
+  lines.push('')
+  if (e.eligiblePairedTurns < 50) {
+    lines.push('结论：唯一、可配对的 HIGH opportunity 只有 ' + e.eligiblePairedTurns + ' 个（需要 ≥50，约各半）。继续收集。')
+  } else if (e.treatment.pairedTurns < 20 || e.control.pairedTurns < 20) {
+    lines.push('结论：总数过了 50，但某一臂不足 20 → 分臂随机性存疑，再看几天。')
   } else {
-    lines.push('结论：已过 50 的门槛，可以按你的四档判断（<30% 不可信 / 30–50% 有信号 / 50–70% 可用 / >70% 值得测触发）。')
+    lines.push('结论：样本量已够。按"相关性 → 差值 → load"三档读，并对 HIGH top-5 做人工相关性抽样。')
   }
   return lines.join('\n')
 }

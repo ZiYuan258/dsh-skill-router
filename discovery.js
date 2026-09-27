@@ -118,6 +118,10 @@ export function discoveryRecord(input) {
       fields: Array.isArray(c.fields) ? c.fields.slice() : [],
     })),
     injected: source.injected === true,
+    // The randomised assignment for this HIGH opportunity: 'treatment' | 'control' | 'not-eligible'.
+    // Recorded next to `injected` rather than derived from it, because the whole point of the arm is
+    // that it was decided independently of the outcome.
+    arm: typeof source.arm === 'string' && source.arm !== '' ? source.arm : null,
     // How many bytes the hint actually added to this turn's context. Recorded rather than
     // assumed: the whole case for injecting rests on this number being small, and an estimate
     // in a design note is not evidence. 0 when nothing was injected.
@@ -159,6 +163,7 @@ export function turnCallsRecord(input) {
     // the A/B comparison (injected vs not) works on one line.
     tier: typeof source.tier === 'string' ? source.tier : null,
     injected: source.injected === true,
+    arm: typeof source.arm === 'string' && source.arm !== '' ? source.arm : null,
     skillSearchCalls: count(calls.skill_search),
     skillLoadCalls: count(calls.skill_load),
     skillRefCalls: count(calls.skill_ref),

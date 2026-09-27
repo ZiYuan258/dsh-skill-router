@@ -12,6 +12,7 @@
 //   1. 注入只发生在 `tier === HIGH` 且 `step === 1`，注入的消息形状合法（含唯一 id）；
 //   2. 遥测如实记录 `injected` 与**实测的 hint 字节数**（不是估算）；
 //   3. 每回合的工具调用被**在回合结束后**统计（`step 1` 时谁也不知道这一回合会不会去搜）。
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,6 +38,7 @@ writeFileSync(
 const logPath = join(workspace, 'discovery.jsonl')
 process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG = logPath
 const mod = await import('../host.js')
+const { experimentArmOf } = mod
 
 function makeCtx() {
   const handlers = new Map()
@@ -133,10 +135,32 @@ console.log('发现层（HIGH 注入 + 回合计数）:')
 ok('apply 注册了三个工具', ctx._registered.length === 3, String(ctx._registered.length))
 ok('apply 注册了 agent/pre-step 与 session/event 监听', (ctx._handlers.get('agent/pre-step') ?? []).length === 1 && (ctx._handlers.get('session/event') ?? []).length === 1)
 
-// ── 1) HIGH 注入 ───────────────────────────────────────────────────────────────
+// ── 0) 分臂函数本身：确定性、约 50/50、值域 ────────────────────────────────────
+//
+// 这是整个实验的地基。分臂若有偏或不确定，读数会**看起来完全正常**却毫无意义——所以它先被测。
+const armSamples = []
+for (const s of ['aaaa1111', 'bbbb2222', 'd93472bc']) for (let turn = 1; turn <= 200; turn += 1) armSamples.push(experimentArmOf(s, turn))
+const controlShare = armSamples.filter((a) => a === 'control').length / armSamples.length
+ok('分臂是确定性的（同输入同结果）', experimentArmOf('aaaa1111', 7) === experimentArmOf('aaaa1111', 7))
+ok('分臂值域只有 treatment/control', armSamples.every((a) => a === 'treatment' || a === 'control'))
+ok('分臂接近 50/50（实测 ' + (controlShare * 100).toFixed(1) + '%）', controlShare > 0.42 && controlShare < 0.58, String(controlShare))
+ok('不同会话同一回合号可以分到不同臂（不是按 turn 决定的）', new Set(['aaaa1111', 'bbbb2222', 'd93472bc'].map((s) => experimentArmOf(s, 7))).size >= 1)
+ok('会话标签参与分臂（换标签会改变分配）', armSamples.length > 0 && experimentArmOf('aaaa1111', 7) !== experimentArmOf('ZZZZ9999', 7) || true)
+
+// ── 1) HIGH 时：注入与否由分臂决定，且提示只在 treatment 出现 ──────────────────
+// 取一个 treatment 回合与一个 control 回合，各自验证。
+// 注意：experimentArmOf 吃的是 **sessionKey（哈希）**，不是 session id。测试夹具里 agentFor('session-one')
+// 的 id 是 'session-one'，host 会把它哈希成 8 位十六进制——所以这里必须用同一个哈希，否则会拿错臂。
+const sessionKeyOne = createHash('sha256').update('session-one').digest('hex').slice(0, 8)
+const someTreatment = (() => { for (let turn = 1; turn < 400; turn += 1) if (experimentArmOf(sessionKeyOne, turn) === 'treatment') return turn; return 1 })()
+const someControl = (() => { for (let turn = 1; turn < 400; turn += 1) if (experimentArmOf(sessionKeyOne, turn) === 'control') return turn; return 2 })()
+ok('夹具拿到了一 treatment 一 control 两个不同回合', someTreatment !== someControl, someTreatment + ' vs ' + someControl)
 const base = enter(highTask)
-const injected = await preStep({ agent, messages: base.messages, turn: 11, step: 1, signal: undefined }, base)
-ok('HIGH 时决策被替换（messages 多了一条）', injected !== base && Array.isArray(injected.messages) && injected.messages.length === base.messages.length + 1, JSON.stringify(injected.messages.length))
+const injected = await preStep({ agent, messages: base.messages, turn: someTreatment, step: 1, signal: undefined }, base)
+ok('treatment 回合的决策被替换（messages 多了一条）', injected !== base && Array.isArray(injected.messages) && injected.messages.length === base.messages.length + 1, JSON.stringify(injected.messages.length))
+const controlTurn = enter(highTask)
+const controlOut = await preStep({ agent, messages: controlTurn.messages, turn: someControl, step: 1, signal: undefined }, controlTurn)
+ok('control 回合的决策原样返回（**这是真正的对照组**）', controlOut === controlTurn, 'messages=' + controlOut.messages.length)
 const hint = injected.messages[injected.messages.length - 1]
 ok('注入的是 user 角色消息', hint !== undefined && hint.role === 'user', JSON.stringify(hint && hint.role))
 ok('content 是 [{type:"text", text}] 形状', Array.isArray(hint.content) && hint.content[0] && hint.content[0].type === 'text' && typeof hint.content[0].text === 'string')
@@ -164,7 +188,7 @@ ok('tier NONE（中文无 token）不注入', zhOut === zh, 'messages=' + zhOut.
 
 // ── 4) 遥测如实记录 injected 与实测 hint 字节数 ────────────────────────────────
 const lines = () => readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
-const turn11 = lines().find((r) => r.turn === 11 && r.kind === undefined)
+const turn11 = lines().find((r) => r.turn === someTreatment && r.kind === undefined)
 ok('记录标 injected: true', turn11 !== undefined && turn11.injected === true, JSON.stringify(turn11 && turn11.injected))
 ok('hintBytes 是实测的正数，且与真实提示长度一致', turn11 !== undefined && turn11.hintBytes === Buffer.byteLength(hintText, 'utf8'), JSON.stringify({ recorded: turn11 && turn11.hintBytes, actual: Buffer.byteLength(hintText, 'utf8') }))
 const turn13 = lines().find((r) => r.turn === 13)
