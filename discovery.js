@@ -81,6 +81,10 @@ export function discoveryRecord(input) {
     at: new Date().toISOString(),
     turn: typeof source.turn === 'number' ? source.turn : null,
     step: typeof source.step === 'number' ? source.step : null,
+    // Non-reversible session label. Pairing needs equality, not identity — and without it, two
+    // sessions that both reached turn 12 are the same row in this log (measured: 14 turn numbers
+    // were duplicated across sessions before this field existed).
+    sessionKey: typeof source.sessionKey === 'string' && source.sessionKey !== '' ? source.sessionKey : null,
     tier: typeof result.tier === 'string' ? result.tier : 'NONE',
     reason: typeof result.reason === 'string' ? result.reason : 'unknown',
     // How many keywords the task yielded — and the two numbers that make the corpus filter legible:
@@ -88,10 +92,20 @@ export function discoveryRecord(input) {
     tokenCount: Array.isArray(result.tokens) ? result.tokens.length : 0,
     effectiveTokenCount: effective.length,
     filteredCommonTokens: ignored.length,
-    // WHICH words were discarded and how common each was. Without this the filter is a silent
-    // subtraction — "skill: 100% of the corpus" is an explanation, a shorter candidate list is not.
-    // Ratios and discarded words only; never the task's own text.
-    ignoredTokens: ignored.map((item) => ({ token: String(item.token), ratio: typeof item.ratio === 'number' ? item.ratio : null })),
+    // Their RATIOS always; their TEXT only under the debug flag.
+    //
+    // Writing the discarded words unconditionally was a real defect, caught before it fired. A
+    // filtered token is not necessarily `skill` or `skills` — it can be a project name, a customer
+    // name, a vulnerability id, and those are precisely the words that appear everywhere inside one
+    // organization's corpus. "Not the whole task text" is not the same as "harmless", and the ratios
+    // alone still explain the filter ("three words dropped, all above 83%") without naming a word.
+    //
+    // The one record written while the defect existed had filtered nothing, so nothing leaked. That
+    // is luck rather than protection, which is exactly why this is now gated.
+    ignoredTokenRatios: ignored.map((item) => (typeof item.ratio === 'number' ? item.ratio : null)),
+    ignoredTokens: source.debugTokens === true
+      ? ignored.map((item) => ({ token: String(item.token), ratio: typeof item.ratio === 'number' ? item.ratio : null }))
+      : undefined,
     indexRows: typeof source.indexRows === 'number' ? source.indexRows : null,
     elapsedMs: typeof source.elapsedMs === 'number' ? Math.round(source.elapsedMs) : null,
     candidateCount: candidates.length,
@@ -140,6 +154,7 @@ export function turnCallsRecord(input) {
     at: new Date().toISOString(),
     kind: 'turn-calls',
     turn: typeof source.turn === 'number' ? source.turn : null,
+    sessionKey: typeof source.sessionKey === 'string' && source.sessionKey !== '' ? source.sessionKey : null,
     // Copied in so a reader can join this to the discovery record without a second pass, and so
     // the A/B comparison (injected vs not) works on one line.
     tier: typeof source.tier === 'string' ? source.tier : null,

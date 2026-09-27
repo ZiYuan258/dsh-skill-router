@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.12.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.13.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.12.1 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.13.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -549,7 +549,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Twenty-nine dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Thirty dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -568,6 +568,7 @@ Twenty-nine dependency-free scripts. They run against a real staged library when
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
+| `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry into the three metrics and keeps **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
 | `discovery-ranking.mjs` | the **candidate-generator quality guard**: corpus-frequency filtering (a word carried by every row cannot score, `corpusFrequency` reports the ratio, the 80% boundary keeps and >80% drops, and an all-common task reports `no-discriminating-token`), dedupe by skill name (one slot per name, best-scoring copy kept), **tier computed over the deduped effective tokens** (a 100%-frequency word cannot forge HIGH), and genuine strong candidates still reaching HIGH; against a real library it samples that `skill`/`skills` really are 100% words, that a security-audit task ranks `semgrep` first, that a code-review task ranks `code-review` first, and that no candidate list repeats a name |
 | `discovery-injection.mjs` | the discovery wiring (**HIGH injection + per-turn tool counting**): injection happens only at `tier === HIGH` and `step === 1`, the injected message shape is valid (`role`/`content`/`source`/**unique `id`**), two injections differ in id, `step=2` and NONE do not inject, and the original messages are untouched; telemetry records `injected` and a **measured** `hintBytes`; tool calls are counted **per turn after the turn ends** (the three skill tools separately, the native `skill` tool separately, everything else only in aggregate), with counters reset per turn and no tool arguments or skill bodies in the record |
 | `build-index.mjs` | the index generator: **every row resolves to an existing `SKILL.md` by the plugin's own path rule** (the first version added an extra `repo/` level, so 1,028 rows matched 1,028 while zero resolved — counting cannot catch that), `.git`/`node_modules` skipped, BOM/CRLF/block scalars/missing name/missing description, TSV escaping for tabs and quotes, `whenToUse` written only when needed, and the CLI's three `--check` states including CRLF not counting as drift; against a real library it re-checks every row and compares key sets with the existing index |
@@ -596,7 +597,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         twenty-nine runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         thirty runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

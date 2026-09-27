@@ -108,17 +108,24 @@ async function preStep(payload, decision) {
   return result
 }
 
-/** 向会话事件流投递一次 tool/call。 */
-function toolCall(name) {
-  const hs = ctx._handlers.get('session/event') ?? []
-  for (const handler of hs) {
-    const ev = { type: 'tool/call', seq: 1, time: Date.now(), data: { turn: 0, step: 0, callId: 'c', name, arguments: {} } }
-    handler({}, ev)
+/**
+ * 向会话事件流投递一次 tool/call。
+ *
+ * **session 是必填的。** 计数按 (会话标签, 回合) 定位，所以"这是哪个会话的调用"必须由调用方给出。
+ * 第一版让它缺省时退回某个默认会话，结果旧调用点没传参就静默变成 unknown、计数全为 0——一个
+ * "贴心的默认值"制造了一次看起来像产品缺陷的假失败。现在缺它就抛，而不是静默。
+ */
+function toolCall(name, session) {
+  if (session === undefined) throw new Error('toolCall 需要一个 session（第二个参数）')
+  for (const handler of ctx._handlers.get('session/event') ?? []) {
+    handler(session, { type: 'tool/call', seq: 1, time: Date.now(), data: { turn: 0, step: 0, callId: 'c', name, arguments: {} } })
   }
 }
 
 const highTask = 'Run a semgrep security audit on this repo'
-const agent = { session: { header: { cwd: workspace } } }
+// 会话对象带 id：配对键是 (sessionKey, turn)，没有 id 就退化成 (unknown, turn)——那正是旧缺陷。
+const agentFor = (id) => ({ session: { id, header: { cwd: workspace } } })
+const agent = agentFor('session-one')
 const enter = (text) => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text }] }] })
 
 console.log('发现层（HIGH 注入 + 回合计数）:')
@@ -170,12 +177,12 @@ ok('记录里仍然没有用户原文', lines().every((r) => JSON.stringify(r).i
 // 这里先回到第 12 回合的上下文（注入那一次），再投递这一回合的调用。
 const turn12 = enter(highTask)
 await preStep({ agent, messages: turn12.messages, turn: 12, step: 1, signal: undefined }, turn12)
-toolCall('skill_search')
-toolCall('skill_load')
-toolCall('skill')
-toolCall('read')
-toolCall('bash')
-toolCall('glob')
+toolCall('skill_search', agent.session)
+toolCall('skill_load', agent.session)
+toolCall('skill', agent.session)
+toolCall('read', agent.session)
+toolCall('bash', agent.session)
+toolCall('glob', agent.session)
 // 下一次 pre-step 触发 flush，把第 12 回合的计数写出来
 const nextTurn = enter(highTask)
 await preStep({ agent, messages: nextTurn.messages, turn: 14, step: 1, signal: undefined }, nextTurn)
@@ -190,13 +197,47 @@ ok('turn-calls 记录里没有工具参数、没有技能正文', calls12 !== un
 // ── 6) 计数按回合归零（不会把上一回合的数带过来）───────────────────────────────
 const turn14 = enter(highTask)
 await preStep({ agent, messages: turn14.messages, turn: 14, step: 1, signal: undefined }, turn14)
-toolCall('skill_search')
+toolCall('skill_search', agent.session)
 const oneMore = enter(highTask)
 await preStep({ agent, messages: oneMore.messages, turn: 15, step: 1, signal: undefined }, oneMore)
 const calls14 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 14).pop()
 ok('第 14 回合只记它自己的 1 次搜索', calls14 !== undefined && calls14.skillSearchCalls === 1 && calls14.skillLoadCalls === 0, JSON.stringify(calls14))
 
-// ── 7) reject 决策原样返回（不注入、不计数）──────────────────────────────────
+// ── 7) 会话隔离：两个会话的同号回合既不混计数，也不被当成同一条记录 ─────────────
+//
+// 这条修复来自一次实测缺陷：计数状态曾是模块级的、遥测里也没有会话标识，于是两个会话各自的
+// turn 12 是同一条记录（实测 14 个 turn 号被重复），并发会话还会互相污染计数。两个后果都足以让
+// "注入是否改变行为"算反。
+{
+  const A = agentFor('session-A')
+  const B = agentFor('session-B')
+  // 两个会话都走到 turn 40（同号），各投递不同的调用
+  const taskA = enter(highTask)
+  await preStep({ agent: A, messages: taskA.messages, turn: 40, step: 1, signal: undefined }, taskA)
+  const taskB = enter(highTask)
+  await preStep({ agent: B, messages: taskB.messages, turn: 40, step: 1, signal: undefined }, taskB)
+
+  toolCall('skill_search', A.session)
+  toolCall('skill_search', A.session)
+  toolCall('skill_load', B.session)
+
+  // 各自进入下一回合，触发各自的 flush
+  const nextA = enter(highTask)
+  await preStep({ agent: A, messages: nextA.messages, turn: 41, step: 1, signal: undefined }, nextA)
+  const nextB = enter(highTask)
+  await preStep({ agent: B, messages: nextB.messages, turn: 41, step: 1, signal: undefined }, nextB)
+  const turn40 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 40 && r.tier !== undefined)
+  const a40 = turn40.find((r) => r.sessionKey !== null && r.skillSearchCalls === 2)
+  const b40 = turn40.find((r) => r.sessionKey !== null && r.skillLoadCalls === 1)
+  ok('两个会话的同号回合各自结算，且计数不混', a40 !== undefined && b40 !== undefined && a40.sessionKey !== b40.sessionKey, JSON.stringify(turn40.map((r) => ({ k: r.sessionKey, s: r.skillSearchCalls, l: r.skillLoadCalls }))))
+  ok('A 的搜索没有被记到 B 上', a40 !== undefined && a40.skillLoadCalls === 0 && b40 !== undefined && b40.skillSearchCalls === 0)
+
+  // 会话标签是稳定哈希前缀：不出现在日志里的不是会话 id 本身，且同一会话反复出现时一致
+  ok('sessionKey 是短哈希而不是会话 id 本身', a40 !== undefined && /^[0-9a-f]{8}$/.test(String(a40.sessionKey)) && String(a40.sessionKey).includes('session-A') === false, JSON.stringify(a40 && a40.sessionKey))
+  ok('同一会话的标签稳定', a40 !== undefined && b40 !== undefined && a40.sessionKey !== b40.sessionKey)
+}
+
+// ── 8) reject 决策原样返回（不注入、不计数）──────────────────────────────────
 const reject = { kind: 'reject' }
 ok('reject 原样返回', (await preStep({ agent, messages: [], turn: 16, step: 1, signal: undefined }, reject)) === reject)
 

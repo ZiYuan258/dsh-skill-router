@@ -592,7 +592,8 @@ export function discoverRows(rows, taskText, limit) {
     matched: hit.matchCount,
     nameHits: hit.nameHits,
     // WHICH fields matched, not why the agent should care — names only, no prose, because the
-    // injection budget is the whole point (measured on a real library: 329–341 bytes for five).
+    // injection budget is the whole point (measured on the real library: 329–341 bytes, ~91–95
+    // tokens, for five candidates — not the ~57 an earlier note estimated from short sample names).
     fields: matchedFields(hit.row, effectiveTokens),
   }))
 
@@ -1472,7 +1473,7 @@ export function buildSkillRouterTools(ctx, register) {
 // imports node:fs and node:path only, and this entry imports it relatively. Keeping the
 // integration column (reading a task, writing a line) in its own module is what lets the ranking
 // stay pure and testable without a host.
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname as dirnamePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder, turnCallsRecord } from './discovery.js'
@@ -1576,7 +1577,8 @@ export function apply(ctx, config) {
   // be attributed to the hint rather than to a second edit.
   //
   // The cost is why it is worth trying at all: the resident catalog costs ~3,238 tokens per turn
-  // and the three tool schemas ~1,001, while a five-name hint measures ~57.
+  // and the three tool schemas ~1,001, while a five-name hint measures 329–341 bytes (~91–95 tokens)
+  // on the real library. An earlier note said ~57; that came from short sample names and was wrong.
   const INJECT_TIERS = new Set(['HIGH'])
   // Writing the task's own keywords to disk off by default: a keyword can carry a project, a
   // customer or a vulnerability name. `ctx.config` first (so a patch row can set it) with an env
@@ -1603,26 +1605,48 @@ export function apply(ctx, config) {
      * misattributed, which is the right failure direction for a measurement.
      */
     const countedTools = new Set(['skill_search', 'skill_load', 'skill_ref', 'skill'])
-    let current = null
 
-    const flush = () => {
-      if (current === null) return
-      const done = current
-      current = null
+    /**
+     * A stable, non-reversible label for one session.
+     *
+     * **Why this is not optional.** The turn counter used to be module-level, and telemetry carried
+     * no session identity — so two conversations interleaved their counts, and two sessions that
+     * both reached turn 12 were indistinguishable in the log. Measured on the live log: `turn` 1
+     * appeared 3 times, and 14 turn numbers were duplicated. Analysis that pairs records by `turn`
+     * alone therefore merges different conversations, which is enough to invert a conclusion.
+     *
+     * The label is a hash prefix because the session id is an opaque identifier the log has no use
+     * for: pairing needs equality, not identity. 8 hex characters are enough to separate the handful
+     * of concurrent sessions while keeping the log free of host identifiers.
+     */
+    const sessionKeyOf = (session) => {
+      const dbg = globalThis.__sk; if (Array.isArray(dbg)) dbg.push({ keys: session === null || session === undefined ? 'null' : Object.keys(session).join(','), id: session && session.id })
+      const id = session === undefined || session === null || session.id === undefined ? '' : String(session.id)
+      return id === '' ? 'unknown' : createHash('sha256').update(id).digest('hex').slice(0, 8)
+    }
+    // sessionKey -> the turn currently being counted for it.
+    const perSession = new Map()
+
+    /** Settle one session's turn. Keyed by sessionKey so concurrent sessions cannot mix counts. */
+    const flush = (sessionKey) => {
+      const done = perSession.get(sessionKey)
+      if (done === undefined) return
+      perSession.delete(sessionKey)
       try {
-        recorder.write(turnCallsRecord({ turn: done.turn, tier: done.tier, injected: done.injected, calls: done.calls, otherToolCalls: done.other }))
+        recorder.write(turnCallsRecord({ turn: done.turn, sessionKey, tier: done.tier, injected: done.injected, calls: done.calls, otherToolCalls: done.other }))
       } catch {
         /* telemetry is never worth a failed turn */
       }
     }
 
     ctx.on('session/event', (session, event) => {
-      if (current === null || event === null || typeof event !== 'object') return
-      if (event.type !== 'tool/call') return
+      if (event === null || typeof event !== 'object' || event.type !== 'tool/call') return
+      const state = perSession.get(sessionKeyOf(session))
+      if (state === undefined) return
       const name = event.data === null || typeof event.data !== 'object' ? '' : String(event.data.name ?? '')
       if (name === '') return
-      if (countedTools.has(name)) current.calls[name] = (current.calls[name] ?? 0) + 1
-      else current.other += 1
+      if (countedTools.has(name)) state.calls[name] = (state.calls[name] ?? 0) + 1
+      else state.other += 1
     })
 
     ctx.on('agent/pre-step', async ({ agent, messages, turn, step, signal }, next) => {
@@ -1630,7 +1654,12 @@ export function apply(ctx, config) {
       if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
       if (step !== 1) return decision
       // A new turn starting means the previous one is over: flush it before measuring this one.
-      flush()
+      // Keyed by session, so a concurrent conversation cannot settle this one's counts.
+      const dbgAgent = agent
+      const dbgSession = dbgAgent === undefined || dbgAgent === null ? undefined : dbgAgent.session
+      const sessionKey = sessionKeyOf(dbgSession)
+      const dbg2 = globalThis.__pre; if (Array.isArray(dbg2)) dbg2.push({ agentKeys: dbgAgent === undefined || dbgAgent === null ? 'null' : Object.keys(dbgAgent).join(','), sessionKeys: dbgSession === undefined || dbgSession === null ? 'null' : Object.keys(dbgSession).join(','), id: dbgSession && dbgSession.id, key: sessionKey })
+      flush(sessionKey)
       const taskText = taskTextOf(messages).trim()
       if (taskText === '') return decision
       try {
@@ -1639,7 +1668,7 @@ export function apply(ctx, config) {
         const result = await router.discover(taskText, cwd, signal)
         const inject = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
         const hint = inject ? discoveryHint(result) : ''
-        current = { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, calls: {}, other: 0 }
+        perSession.set(sessionKey, { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, calls: {}, other: 0 })
         recorder.write(
           discoveryRecord({
             turn,
@@ -1651,6 +1680,8 @@ export function apply(ctx, config) {
             // Measured, not estimated: the case for injecting rests on this number being small.
             hintBytes: Buffer.byteLength(hint, 'utf8'),
             tokensUsed: debugTokens ? result.effectiveTokens : undefined,
+            debugTokens,
+            sessionKey,
           }),
         )
         // Appended to this step's claimed batch — not injected into the inbox.
