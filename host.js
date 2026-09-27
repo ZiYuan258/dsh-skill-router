@@ -464,18 +464,68 @@ const DISCOVERY_MIN_SCORE = 24
 /** A task sentence longer than this gets truncated to its first tokens, in order. */
 const DISCOVERY_MAX_TOKENS = 12
 /**
- * Independent tokens required for the top tier. One lucky word matching one `whenToUse` line is
- * a coincidence; two different words landing is a signal.
+ * Independent tokens required for the top tier — counted over the **effective** tokens only, i.e.
+ * after the corpus-frequency filter below. One lucky word matching one `whenToUse` line is a
+ * coincidence; two different discriminating words landing is a signal.
  */
 const DISCOVERY_STRONG_MATCHES = 2
+/**
+ * A token carried by more than this share of the corpus cannot discriminate inside it.
+ *
+ * Measured on a 1,028-row library: `skill` and `skills` appear in **1,028 of 1,028 rows (100%)**,
+ * and `task` in 10%. A static `STOP_WORDS` list cannot name these — they are not language noise,
+ * they are zero signal *for this corpus*, and which words those are changes when the library does.
+ * So the list is computed from the index instead.
+ *
+ * Measured consequence of not having this: discovery produced `implement-task ×3` for one task, and
+ * injected `azure-identity-py / entra-agent-id / gke-workload-identity` for "I am about to update
+ * DSH" — a candidate set that scored HIGH while carrying no information.
+ */
+const DISCOVERY_COMMON_TOKEN_RATIO = 0.8
+
+/**
+ * Document frequency for the tokens of one task: how many rows carry each token, and the ratio.
+ *
+ * The counter of last resort for a candidate generator: a token that every row contains contributes
+ * a high score to every row, which is the same as contributing nothing — except that it also wins
+ * the ranking. Kept as a returned map (not just a filter) so telemetry and `doctor` can say *which*
+ * words were ignored and how common they were, rather than silently dropping them.
+ *
+ * @param rows - parsed index rows.
+ * @param tokens - the task's tokens, already through `tokenize`.
+ * @returns `Map<token, { rows, ratio }>`.
+ */
+export function corpusFrequency(rows, tokens) {
+  const list = Array.isArray(rows) ? rows : []
+  const stats = new Map()
+  for (const token of Array.isArray(tokens) ? tokens : []) {
+    let count = 0
+    for (const row of list) {
+      const haystack = String(row.name ?? '') + ' ' + String(row.description ?? '') + ' ' + String(row.whenToUse ?? '') + ' ' + String(row.repo ?? '') + '/' + String(row.relpath ?? '')
+      if (haystack.toLowerCase().includes(token)) count += 1
+    }
+    stats.set(token, { rows: count, ratio: list.length === 0 ? 0 : count / list.length })
+  }
+  return stats
+}
 
 /**
  * Rank index rows for a task sentence. Pure — no I/O, no clock, no telemetry.
  *
+ * The pipeline, in order, because the order is the fix:
+ *
+ *   task → tokenize → STOP_WORDS → **corpus-frequency filter** → scoreRow → **dedupe by name**
+ *        → sort → top 5 → tier over the effective tokens
+ *
+ * The last two stages were missing and each produced a measured defect: scoring on tokens that every
+ * row carries (so the ranking was noise wearing a score), and letting one skill's several copies
+ * occupy several of the five slots (`implement-task ×3` in one real hint).
+ *
  * @param rows - parsed index rows.
  * @param taskText - the raw user task; may be any language.
  * @param limit - maximum candidates.
- * @returns `{ candidates, tokens, tier, reason }`. `reason` is a code, never user text.
+ * @returns `{ candidates, tokens, effectiveTokens, ignoredTokens, tier, reason }` — all names and
+ *   codes, never user text beyond the tokens the task itself yielded.
  */
 export function discoverRows(rows, taskText, limit) {
   const capped = typeof limit === 'number' && limit > 0 ? limit : DISCOVERY_LIMIT
@@ -487,18 +537,29 @@ export function discoverRows(rows, taskText, limit) {
   // A Chinese or Japanese task yields no tokens at all, because the index is matched on Latin
   // script. That is a property of the index, not a bug to paper over: report the code and let
   // the dry run measure how often it happens.
-  if (tokens.length === 0) return { candidates: [], tokens: [], tier: 'NONE', reason: 'no-searchable-token' }
+  if (tokens.length === 0) return { candidates: [], tokens: [], effectiveTokens: [], ignoredTokens: [], tier: 'NONE', reason: 'no-searchable-token' }
+
+  // Stage: corpus-frequency filter. Discovery only — `skill_search` keeps its own tokens untouched,
+  // because filtering there would silently change the behaviour of an explicit tool call.
+  const frequency = corpusFrequency(list, tokens)
+  const effectiveTokens = tokens.filter((token) => (frequency.get(token)?.ratio ?? 0) <= DISCOVERY_COMMON_TOKEN_RATIO)
+  const ignoredTokens = tokens
+    .filter((token) => effectiveTokens.includes(token) === false)
+    .map((token) => ({ token, ratio: Number((frequency.get(token)?.ratio ?? 0).toFixed(3)) }))
+  // Every keyword was too common to discriminate. Saying "no candidate" is the honest answer;
+  // scoring on them anyway is what produced the noise this filter exists to remove.
+  if (effectiveTokens.length === 0) return { candidates: [], tokens, effectiveTokens, ignoredTokens, tier: 'NONE', reason: 'no-discriminating-token' }
 
   const hits = []
   for (const row of list) {
-    const scored = scoreRow(row, { tokens, requireAll: false, explaining: false, exactText: taskText })
+    const scored = scoreRow(row, { tokens: effectiveTokens, requireAll: false, explaining: false, exactText: taskText })
     if (scored === undefined || scored.score < DISCOVERY_MIN_SCORE) continue
     hits.push(scored)
   }
-  if (hits.length === 0) return { candidates: [], tokens, tier: 'NONE', reason: 'no-candidate' }
+  if (hits.length === 0) return { candidates: [], tokens, effectiveTokens, ignoredTokens, tier: 'NONE', reason: 'no-candidate' }
 
   // Deterministic: score, then how many tokens landed, then how many hit the name, then the
-  // name — so the same task always yields the same list, which the dry run depends on.
+  // name — so the same task always yields the same list, which the experiment depends on.
   hits.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
     if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
@@ -506,7 +567,24 @@ export function discoverRows(rows, taskText, limit) {
     return String(a.row.name).localeCompare(String(b.row.name))
   })
 
-  const candidates = hits.slice(0, capped).map((hit) => ({
+  // Stage: dedupe by skill name, keeping each name's best-scoring copy. A library assembled from
+  // several upstreams carries the same skill more than once, and `skill_load` already has a
+  // documented way to disambiguate copies — discovery offering the same name three times is not
+  // three candidates, it is one candidate and two wasted slots.
+  const byName = new Map()
+  for (const hit of hits) {
+    const key = String(hit.row.name).toLowerCase()
+    const seen = byName.get(key)
+    if (seen === undefined || hit.score > seen.score) byName.set(key, hit)
+  }
+  const ranked = [...byName.values()].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+    if (b.nameHits !== a.nameHits) return b.nameHits - a.nameHits
+    return String(a.row.name).localeCompare(String(b.row.name))
+  })
+
+  const candidates = ranked.slice(0, capped).map((hit) => ({
     name: String(hit.row.name),
     repo: String(hit.row.repo),
     relpath: String(hit.row.relpath),
@@ -514,19 +592,24 @@ export function discoverRows(rows, taskText, limit) {
     matched: hit.matchCount,
     nameHits: hit.nameHits,
     // WHICH fields matched, not why the agent should care — names only, no prose, because the
-    // injection budget is the whole point (measured: five names plus a hint is ~142 bytes).
-    fields: matchedFields(hit.row, tokens),
+    // injection budget is the whole point (measured on a real library: 329–341 bytes for five).
+    fields: matchedFields(hit.row, effectiveTokens),
   }))
 
-  const best = hits[0]
-  const runnerUp = hits[1]
+  // Tier is computed over the DEDUPED ranking, and over effective tokens only.
+  //
+  // Both halves matter. Over the raw hits, three copies of one skill could vouch for each other as
+  // best-and-runner-up; over raw tokens, `skill` (present in 100% of rows) counted as one of the two
+  // independent matches — which is how a noise set reached HIGH.
+  const best = ranked[0]
+  const runnerUp = ranked[1]
   let tier = 'MEDIUM'
   if (best.nameHits > 0 && best.matchCount >= DISCOVERY_STRONG_MATCHES) tier = 'HIGH'
   // A single candidate that just clears the floor is not a strong suggestion, and two candidates
   // that score about the same mean the ranking itself is unsure. Both are the same fact to the
-  // dry run: this task's outcome should be read with care.
+  // experiment: this task's outcome should be read with care.
   else if (runnerUp === undefined || best.score < runnerUp.score * 1.25) tier = 'NONE'
-  return { candidates, tokens, tier, reason: 'ok' }
+  return { candidates, tokens, effectiveTokens, ignoredTokens, tier, reason: 'ok' }
 }
 
 /** Which of the four weighted fields each matched token landed in — for telemetry, not display. */
@@ -1462,7 +1545,7 @@ function contextMessage(text) {
   }
 }
 
-export function apply(ctx) {
+export function apply(ctx, config) {
   const router = buildSkillRouterTools(ctx, (toolName, tool) => {
     ctx.effect(() => ctx.tools.register(tool), 'skill-router: ' + toolName)
   })
@@ -1495,6 +1578,13 @@ export function apply(ctx) {
   // The cost is why it is worth trying at all: the resident catalog costs ~3,238 tokens per turn
   // and the three tool schemas ~1,001, while a five-name hint measures ~57.
   const INJECT_TIERS = new Set(['HIGH'])
+  // Writing the task's own keywords to disk off by default: a keyword can carry a project, a
+  // customer or a vulnerability name. `ctx.config` first (so a patch row can set it) with an env
+  // var as the fallback, because whether cordis hands a mounted row its config is not something
+  // this repo has verified.
+  const debugTokens = config !== null && typeof config === 'object' && config.discovery !== null && typeof config.discovery === 'object' && config.discovery.debugTokens === true
+    ? true
+    : process.env.DSH_SKILL_ROUTER_DEBUG_TOKENS === '1'
   const discoveryLog = process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG
   const recorder = makeDiscoveryRecorder(discoveryLog === undefined ? defaultDiscoveryLogPath() : discoveryLog, undefined)
   if (recorder.path !== undefined) {
@@ -1560,6 +1650,7 @@ export function apply(ctx) {
             injected: inject,
             // Measured, not estimated: the case for injecting rests on this number being small.
             hintBytes: Buffer.byteLength(hint, 'utf8'),
+            tokensUsed: debugTokens ? result.effectiveTokens : undefined,
           }),
         )
         // Appended to this step's claimed batch — not injected into the inbox.

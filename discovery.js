@@ -68,21 +68,30 @@ export function makeDiscoveryRecorder(path, maxBytes) {
  * Kept a pure function so the shape can be pinned by a test: the guarantee that no user text
  * reaches the file is a property of this function, and a guarantee nothing checks is a comment.
  *
- * @param input - `{ turn, step, result, elapsedMs, indexRows, injected, hintBytes }`.
+ * @param input - `{ turn, step, result, elapsedMs, indexRows, injected, hintBytes, tokensUsed }`.
  * @returns a flat, JSON-safe record with no free-form user content.
  */
 export function discoveryRecord(input) {
   const source = input === null || input === undefined ? {} : input
   const result = source.result === null || source.result === undefined ? {} : source.result
   const candidates = Array.isArray(result.candidates) ? result.candidates : []
+  const ignored = Array.isArray(result.ignoredTokens) ? result.ignoredTokens : []
+  const effective = Array.isArray(result.effectiveTokens) ? result.effectiveTokens : []
   return {
     at: new Date().toISOString(),
     turn: typeof source.turn === 'number' ? source.turn : null,
     step: typeof source.step === 'number' ? source.step : null,
     tier: typeof result.tier === 'string' ? result.tier : 'NONE',
     reason: typeof result.reason === 'string' ? result.reason : 'unknown',
-    // How many keywords the task yielded. A count, never the words themselves.
+    // How many keywords the task yielded — and the two numbers that make the corpus filter legible:
+    // how many were discarded for being too common to discriminate, and how many survived.
     tokenCount: Array.isArray(result.tokens) ? result.tokens.length : 0,
+    effectiveTokenCount: effective.length,
+    filteredCommonTokens: ignored.length,
+    // WHICH words were discarded and how common each was. Without this the filter is a silent
+    // subtraction — "skill: 100% of the corpus" is an explanation, a shorter candidate list is not.
+    // Ratios and discarded words only; never the task's own text.
+    ignoredTokens: ignored.map((item) => ({ token: String(item.token), ratio: typeof item.ratio === 'number' ? item.ratio : null })),
     indexRows: typeof source.indexRows === 'number' ? source.indexRows : null,
     elapsedMs: typeof source.elapsedMs === 'number' ? Math.round(source.elapsedMs) : null,
     candidateCount: candidates.length,
@@ -99,6 +108,12 @@ export function discoveryRecord(input) {
     // assumed: the whole case for injecting rests on this number being small, and an estimate
     // in a design note is not evidence. 0 when nothing was injected.
     hintBytes: typeof source.hintBytes === 'number' && source.hintBytes > 0 ? Math.round(source.hintBytes) : 0,
+    // The task's own keywords, and ONLY under an explicit debug flag.
+    //
+    // They are not the raw task text, but they are not harmless either: a keyword can be a project
+    // name, a customer name, a vulnerability id. Off by default; `undefined` rather than `[]` when
+    // off, so a reader can tell "not recorded" from "recorded and empty".
+    tokensUsed: Array.isArray(source.tokensUsed) ? source.tokensUsed.map((t) => String(t)) : undefined,
   }
 }
 

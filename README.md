@@ -372,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.12.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -420,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.12.0 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.12.1 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -445,11 +445,19 @@ inject: (sessionId, binding) => {
 ```
 用户任务（仅第一步）
    ↓
-与 skill_search 同一个 tokenizer、同一个 scoreRow 打分函数（权重只写一份）
+tokenize（与 skill_search 同一个 tokenizer）
    ↓
-但**不继承那个工具的查询策略**：不做严格 AND、不做 all-but-one 回落
+STOP_WORDS（语言层面的噪声词）
+   ↓
+**语料频率过滤**：出现率 > 80% 的词直接丢弃（判别力 < 20%）
+   ↓
+scoreRow（与 skill_search 同一个打分函数，权重只写一份）
+   ↓
+**按技能名去重**：同名多份只占一个名额，保留最高分
    ↓
 top 5，或明确"什么都没有"
+   ↓
+tier 在**去重后、且只在有效 token 上**计算
    ↓
 tier === HIGH → 一句话摆到模型面前；其余什么都不做
 ```
@@ -485,6 +493,23 @@ Load any that fit with skill_load, or ignore this and continue without one.
 
 - **放进 `decision.messages`，不是 `agent.inject()`。** `preStep` 在派发瀑布**之前**就调用了 `inbox.claim()`，`inject()` 的东西要等到**下一步**才被取走——而这一层要在第一步就起作用。`decision.messages` 才是当前这一步进入请求的权威批次。
 - **注入的消息带唯一 `id`。** 形状照框架自己的 `createUserMessage` 抄：`{ role, content: [{type:'text',text}], source: {kind}, id }`。id 不是装饰：框架消息总是带一个，两条注入共享 id 会让下游无法区分。
+
+
+### 调试开关：把任务的 token 写进遥测
+
+默认**只记数量**，不记词本身——一个关键词可能带着项目名、客户名或漏洞编号。需要排查候选质量时才打开：
+
+```yaml
+# cordis.patch.yml 的行上
+- insert:
+    - id: skill-router
+      name: dsh-skill-router
+      config:
+        discovery:
+          debugTokens: true
+```
+
+或环境变量 `DSH_SKILL_ROUTER_DEBUG_TOKENS=1`（两条路都留着，因为"cordis 是否把 config 交给挂载的行"这件事本仓库还没验过）。打开后记录里会多一个 `tokensUsed` 字段。
 
 ### 遥测现在记两件事，因为它们回答的是两个问题
 
@@ -529,7 +554,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-二十八个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+二十九个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -548,6 +573,7 @@ npm test
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
+| `discovery-ranking.mjs` | **候选生成器的质量护栏**：语料频率过滤（全库都有的词不得参与评分、`corpusFrequency` 如实报道比例、阈值边界 80% 保留 / >80% 丢弃、全部无判别力时给 `no-discriminating-token`）、按技能名去重（同名只占一个名额、保留最高分）、**tier 在去重后的有效 token 上计算**（100% 词不能伪造 HIGH）、真正的强候选仍是 HIGH；有真库时抽样验证 `skill`/`skills` 确为 100% 词、且安全审计任务把 `semgrep` 排第一、代码审查任务把 `code-review` 类排前、候选名不重复 |
 | `discovery-injection.mjs` | 发现层的接线（**HIGH 注入 + 每回合工具计数**）：注入只发生在 `tier === HIGH` 且 `step === 1`、注入消息形状合法（`role`/`content`/`source`/**唯一 `id`**）、两次注入 id 不同、`step=2` 与 NONE 不注入、原文消息未被改动；遥测如实记 `injected` 与**实测** `hintBytes`；工具调用**在回合结束后**按回合计数（三个技能工具各记、原生 `skill` 单独记、其它工具只汇总），且计数按回合归零、记录里没有工具参数与正文 |
 | `build-index.mjs` | 索引生成器：**每一行都按插件的路径规则解析到真实存在的 `SKILL.md`**（第一版 `relpath` 多套了一层 `repo/`，行数 1028 = 1028 却 0 行可解析——计数检查抓不到这种错）、`.git`/`node_modules` 被跳过、BOM/CRLF/块标量/缺 name/缺 description 各形状、制表符与引号的 TSV 转义、`whenToUse` 只在需要时写第 7 列、CLI 的 `--check` 三态与 CRLF 不算过期；有真库时逐行复核并与现有索引比键集合 |
 | `doctor.mjs` | 库体检的**每条断言都构造一种真实故障**并要求它被报出来（索引不存在 / 过期 / 缺失 / 无 description / 跨仓库重名），因为一个永远返回"健康"的体检工具也能通过"健康库返回 OK"那种测试；`--json` 可解析且不含整库明细 |
@@ -575,7 +601,7 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         二十八个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         二十九个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断
