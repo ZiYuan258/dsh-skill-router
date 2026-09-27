@@ -129,34 +129,64 @@ export function summarise(pairs) {
   // **为什么不能拿"未注入"当对照。** 注入与否由 tier 决定，所以"注入组"与"未注入组"在构造上就是
   // 不同的任务总体（"做 Semgrep 安全审计" vs "今天天气怎么样"）。两组搜索率之差说明不了提示的作用。
   //
-  // 真正的对照是**同一类任务**（都是 HIGH、候选质量相同）里被随机分到 control 的那些回合。所以
-  // 下列所有比率都按 `arm` 分，而 `injected` 只在核对"分配是否被真正执行"时用。
+  // **为什么主要指标只算每个会话的第一个 HIGH。** 干预是**持久的**：注入的提示会以 `user/message`
+  // 追加到会话 surface（`surfaceOp: 'append'`），之后每一步的历史都由它派生。所以同一会话里
+  // "treatment 之后又出现 control"时，那个 control **仍然看得见前面的提示**——污染是单向的
+  // （treatment 污染后续 control，反之不成立），汇总起来会朝一个已知方向偏。
   //
-  // 分臂只统计 **arm 为 treatment/control 的 paired 回合**；`not-eligible` 与非 HIGH 的一律不进，
-  // 否则又会把不同任务总体混进来——那正是这一版要修掉的错误。
+  // 因此：
+  //   * 分臂按**会话**（不是按回合）；
+  //   * **主要指标**只统计每个会话的**第一个** eligible opportunity —— 它是唯一可证明"先于本实验
+  //     任何提示"的观测，因为那时还没有任何东西被注入；
+  //   * 同一会话的后续 opportunity 会一并报告，但标为**探索性**：Agent 已经搜过、学过，之后的回合
+  //     天然不独立。
   const byArm = (arm) => pairs.paired.filter((t) => t.arm === arm)
   const rate = (list, field) => {
-    if (list.length === 0) return { pairedTurns: 0, calls: 0, rate: null }
+    if (list.length === 0) return { turns: 0, calls: 0, rate: null }
     const hits = list.filter((t) => (t.calls[field] ?? 0) > 0).length
-    return { pairedTurns: list.length, calls: hits, rate: hits / list.length }
+    return { turns: list.length, calls: hits, rate: hits / list.length }
   }
-  const treatment = byArm('treatment')
-  const control = byArm('control')
+  // 每个会话的第一个 eligible opportunity：整个读数的主指标就建立在这上面。
+  const firstPerSession = pairs.paired.filter((t) => t.firstEligible === true && (t.arm === 'treatment' || t.arm === 'control'))
+  const laterPerSession = pairs.paired.filter((t) => t.firstEligible !== true && (t.arm === 'treatment' || t.arm === 'control'))
   const notEligible = pairs.paired.filter((t) => t.arm === 'not-eligible' || t.arm === null || t.arm === undefined)
-  // 分配与执行是否一致：control 回合不该有 hint，treatment 回合不该没有。
+  // 分配与执行是否一致：control 会话不该有 hint，treatment 会话不该没有。
   const armViolations = pairs.paired.filter((t) => (t.arm === 'control' && t.injected === true) || (t.arm === 'treatment' && t.injected !== true))
+  // 同一会话能不能既被记成 firstEligible 又不是第一个？重复会破坏"每会话一个观测"。
+  const sessionFirstCount = new Map()
+  for (const t of pairs.paired) {
+    if (t.firstEligible !== true) continue
+    sessionFirstCount.set(t.sessionKey, (sessionFirstCount.get(t.sessionKey) ?? 0) + 1)
+  }
+  const duplicateFirsts = [...sessionFirstCount.values()].filter((n) => n > 1).length
   return {
     records: { discovery: pairs.discovery.length, turnCalls: pairs.calls.size, paired: pairs.paired.length, unpaired: pairs.unpaired.length, malformed: pairs.malformed, legacy: pairs.legacy === undefined ? 0 : pairs.legacy.length },
     tier,
     reason,
     experiment: {
-      treatment: { ...rate(treatment, 'skillSearchCalls'), load: rate(treatment, 'skillLoadCalls') },
-      control: { ...rate(control, 'skillSearchCalls'), load: rate(control, 'skillLoadCalls') },
+      // **主指标**：每会话一个独立观测。
+      primary: {
+        treatment: { ...rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillLoadCalls') },
+        control: { ...rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillLoadCalls') },
+        sessions: firstPerSession.length,
+      },
+      // **探索性**：同一会话的后续 opportunity，不独立，只作参考。
+      exploratory: {
+        treatment: rate(laterPerSession.filter((t) => t.arm === 'treatment'), 'skillSearchCalls'),
+        control: rate(laterPerSession.filter((t) => t.arm === 'control'), 'skillSearchCalls'),
+        turns: laterPerSession.length,
+      },
+      // 全量汇总（含非首观测）——保留，但**不能**用它下因果结论。
+      pooled: {
+        treatment: rate(byArm('treatment'), 'skillSearchCalls'),
+        control: rate(byArm('control'), 'skillSearchCalls'),
+        turns: byArm('treatment').length + byArm('control').length,
+      },
       notEligiblePairedTurns: notEligible.length,
       // 非零即为 bug：说明分配与实际注入不一致，这批数据不能用来判断效果。
       armViolations: armViolations.length,
-      // 门槛：唯一、可配对的 HIGH opportunity 数（treatment + control）。
-      eligiblePairedTurns: treatment.length + control.length,
+      // 非零即为 bug：同一会话被记了两次 firstEligible，主指标的分母不可信。
+      duplicateFirsts,
     },
     anyCall: pairs.paired.filter(calledSomething).length,
     hintBytes: pairs.paired.filter((t) => t.injected === true).map((t) => t.hintBytes ?? 0),
@@ -187,32 +217,43 @@ export function renderReport(summary) {
   lines.push('reason 分布：')
   for (const [k, n] of Object.entries(summary.reason).sort((a, b) => b[1] - a[1])) lines.push('  ' + pad(k, 26) + n)
   lines.push('')
-  lines.push('── 实验：同一个 HIGH 总体里的随机分臂 ──')
+  lines.push('── 实验：按会话随机分臂，主指标只用每会话的第一个 HIGH ──')
   lines.push('')
   const e = summary.experiment
-  lines.push('① 提示 → Agent 是否开始 skill_search（**核心指标**）')
-  lines.push('  ' + pad('treatment（有提示）：', 26) + e.treatment.pairedTurns + ' 个回合，' + e.treatment.calls + ' 个搜了 → ' + pct(e.treatment.rate))
-  lines.push('  ' + pad('control（无提示）：', 26) + e.control.pairedTurns + ' 个回合，' + e.control.calls + ' 个搜了 → ' + pct(e.control.rate))
-  if (e.treatment.rate !== null && e.control.rate !== null) {
-    const delta = (e.treatment.rate - e.control.rate) * 100
-    lines.push('  ' + pad('差值：', 26) + (delta >= 0 ? '+' : '') + delta.toFixed(1) + ' 个百分点')
-  }
+  const delta = (a, b) => (a === null || b === null ? null : (a - b) * 100)
+  lines.push('① 提示 → Agent 是否开始 skill_search（**主指标**）')
+  lines.push('  每会话取第一个 eligible opportunity，一 session 一个独立观测：')
+  lines.push('  ' + pad('treatment（有提示）：', 26) + e.primary.treatment.turns + ' 个会话，' + e.primary.treatment.calls + ' 个搜了 → ' + pct(e.primary.treatment.rate))
+  lines.push('  ' + pad('control（无提示）：', 26) + e.primary.control.turns + ' 个会话，' + e.primary.control.calls + ' 个搜了 → ' + pct(e.primary.control.rate))
+  const primaryDelta = delta(e.primary.treatment.rate, e.primary.control.rate)
+  if (primaryDelta !== null) lines.push('  ' + pad('差值：', 26) + (primaryDelta >= 0 ? '+' : '') + primaryDelta.toFixed(1) + ' 个百分点')
   lines.push('')
-  lines.push('② search → skill_load（两组分别看）')
-  lines.push('  ' + pad('treatment 里加载了：', 26) + e.treatment.load.calls + ' → ' + pct(e.treatment.load.rate))
-  lines.push('  ' + pad('control 里加载了：', 26) + e.control.load.calls + ' → ' + pct(e.control.load.rate))
+  lines.push('② search → skill_load（主指标样本内）')
+  lines.push('  ' + pad('treatment 里加载了：', 26) + e.primary.treatment.load.calls + ' → ' + pct(e.primary.treatment.load.rate))
+  lines.push('  ' + pad('control 里加载了：', 26) + e.primary.control.load.calls + ' → ' + pct(e.primary.control.load.rate))
   lines.push('')
   lines.push('③ 候选相关性（HIGH 的 top-5 里至少一个明显相关）')
   lines.push('  **这个脚本算不出来，必须人工抽样。** 且它是前置门槛：相关性不过关时，①② 的差值没有解释力。')
   lines.push('')
-  lines.push(pad('非合格回合（不进分臂）：', 26) + e.notEligiblePairedTurns + '（NONE/MEDIUM 或旧记录）')
-  if (e.armViolations > 0) lines.push('  ⚠️ 分配与实际注入不一致的回合：' + e.armViolations + ' —— 这批数据不能用来判断效果')
-  else lines.push('  ' + pad('分配与实际注入一致：', 26) + '是（0 处冲突）')
+  lines.push('── 参考：不独立、不能用来下结论的数字 ──')
+  lines.push('  同一会话的后续 opportunity 不独立（Agent 已经搜过、学过），且提示持久存在会让后续 control')
+  lines.push('  仍然看得见前面的提示，所以下面两行只作参考：')
+  lines.push('  ' + pad('探索性（后续回合）：', 26) + 'treatment ' + e.exploratory.treatment.turns + ' 回合 → ' + pct(e.exploratory.treatment.rate) + '，control ' + e.exploratory.control.turns + ' 回合 → ' + pct(e.exploratory.control.rate))
+  lines.push('  ' + pad('全量汇总（含非首）：', 26) + 'treatment ' + e.pooled.treatment.turns + ' → ' + pct(e.pooled.treatment.rate) + '，control ' + e.pooled.control.turns + ' → ' + pct(e.pooled.control.rate))
+  const pooledDelta = delta(e.pooled.treatment.rate, e.pooled.control.rate)
+  if (pooledDelta !== null && primaryDelta !== null && Math.abs(pooledDelta - primaryDelta) > 5) {
+    lines.push('  ⚠️ 全量差值与主指标差值相差 ' + Math.abs(pooledDelta - primaryDelta).toFixed(1) + ' 个百分点 → 与 carryover 的预期方向一致，以主指标为准')
+  }
   lines.push('')
-  if (e.eligiblePairedTurns < 50) {
-    lines.push('结论：唯一、可配对的 HIGH opportunity 只有 ' + e.eligiblePairedTurns + ' 个（需要 ≥50，约各半）。继续收集。')
-  } else if (e.treatment.pairedTurns < 20 || e.control.pairedTurns < 20) {
-    lines.push('结论：总数过了 50，但某一臂不足 20 → 分臂随机性存疑，再看几天。')
+  lines.push(pad('非合格回合（不进分臂）：', 26) + e.notEligiblePairedTurns + '（NONE/MEDIUM 或旧记录）')
+  if (e.armViolations > 0) lines.push('  ⚠️ 分配与实际注入不一致：' + e.armViolations + ' 处 —— 这批数据不能用来判断效果')
+  else lines.push('  ' + pad('分配与实际注入一致：', 26) + '是（0 处冲突）')
+  if (e.duplicateFirsts > 0) lines.push('  ⚠️ 有 ' + e.duplicateFirsts + ' 个会话被记了多次 firstEligible → 主指标分母不可信')
+  lines.push('')
+  if (e.primary.sessions < 50) {
+    lines.push('结论：主指标只有 ' + e.primary.sessions + ' 个会话（需要 ≥50 个会话，各一个合格观测）。继续收集。')
+  } else if (e.primary.treatment.turns < 20 || e.primary.control.turns < 20) {
+    lines.push('结论：会话数过了 50，但某一臂不足 20 → 分臂随机性存疑，再看几天。')
   } else {
     lines.push('结论：样本量已够。按"相关性 → 差值 → load"三档读，并对 HIGH top-5 做人工相关性抽样。')
   }

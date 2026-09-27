@@ -135,32 +135,44 @@ console.log('发现层（HIGH 注入 + 回合计数）:')
 ok('apply 注册了三个工具', ctx._registered.length === 3, String(ctx._registered.length))
 ok('apply 注册了 agent/pre-step 与 session/event 监听', (ctx._handlers.get('agent/pre-step') ?? []).length === 1 && (ctx._handlers.get('session/event') ?? []).length === 1)
 
-// ── 0) 分臂函数本身：确定性、约 50/50、值域 ────────────────────────────────────
+// ── 0) 分臂函数本身：确定性、约 50/50、值域、以及"会话标签真的参与" ─────────────
 //
 // 这是整个实验的地基。分臂若有偏或不确定，读数会**看起来完全正常**却毫无意义——所以它先被测。
+//
+// 注意这一版修掉了两条**恒真断言**。上一版写的是：
+//
+//   new Set([...]).size >= 1                              // 任何集合都满足
+//   armOf(A, 7) !== armOf(B, 7) || true                   // `|| true` 让整条永真
+//
+// 两条都在"测"会话标签参与分臂，实际什么都没测。现在改成固定夹具 + 明确的两臂断言。
+const keyOf = (id) => createHash('sha256').update(id).digest('hex').slice(0, 8)
+// 预先算好的夹具：这两个会话必定落 control，那两个必定落 treatment。
+// 一旦哈希或阈值被改动，夹具就会失配——那正是它该做的事。
+const CONTROL_FIXTURE = 'fixture-session-1'
+const TREATMENT_FIXTURE = 'fixture-session-0'
+ok('固定夹具 A 落在 control（' + experimentArmOf(keyOf(CONTROL_FIXTURE)) + '）', experimentArmOf(keyOf(CONTROL_FIXTURE)) === 'control')
+ok('固定夹具 B 落在 treatment（' + experimentArmOf(keyOf(TREATMENT_FIXTURE)) + '）', experimentArmOf(keyOf(TREATMENT_FIXTURE)) === 'treatment')
+ok('同会话重复调用永远同臂（确定性）', experimentArmOf(keyOf(CONTROL_FIXTURE)) === experimentArmOf(keyOf(CONTROL_FIXTURE)) && experimentArmOf(keyOf(TREATMENT_FIXTURE)) === experimentArmOf(keyOf(TREATMENT_FIXTURE)))
+// 会话标签**真的**参与：换标签会改变分配。用一对真实存在的异臂夹具来断言，而不是 `|| true`。
+ok('换会话标签会改变分配（不是常量函数）', experimentArmOf(keyOf(CONTROL_FIXTURE)) !== experimentArmOf(keyOf(TREATMENT_FIXTURE)))
+// 值域
 const armSamples = []
-for (const s of ['aaaa1111', 'bbbb2222', 'd93472bc']) for (let turn = 1; turn <= 200; turn += 1) armSamples.push(experimentArmOf(s, turn))
-const controlShare = armSamples.filter((a) => a === 'control').length / armSamples.length
-ok('分臂是确定性的（同输入同结果）', experimentArmOf('aaaa1111', 7) === experimentArmOf('aaaa1111', 7))
+for (let i = 0; i < 500; i += 1) armSamples.push(experimentArmOf(keyOf('sample-session-' + i)))
 ok('分臂值域只有 treatment/control', armSamples.every((a) => a === 'treatment' || a === 'control'))
+const controlShare = armSamples.filter((a) => a === 'control').length / armSamples.length
 ok('分臂接近 50/50（实测 ' + (controlShare * 100).toFixed(1) + '%）', controlShare > 0.42 && controlShare < 0.58, String(controlShare))
-ok('不同会话同一回合号可以分到不同臂（不是按 turn 决定的）', new Set(['aaaa1111', 'bbbb2222', 'd93472bc'].map((s) => experimentArmOf(s, 7))).size >= 1)
-ok('会话标签参与分臂（换标签会改变分配）', armSamples.length > 0 && experimentArmOf('aaaa1111', 7) !== experimentArmOf('ZZZZ9999', 7) || true)
+// 会话臂不随回合变化：现在函数根本不接受 turn，所以两次调用（模拟两个回合）必然同臂。
+ok('同一会话的臂不随回合变化', experimentArmOf(keyOf(TREATMENT_FIXTURE)) === experimentArmOf(keyOf(TREATMENT_FIXTURE)))
 
-// ── 1) HIGH 时：注入与否由分臂决定，且提示只在 treatment 出现 ──────────────────
-// 取一个 treatment 回合与一个 control 回合，各自验证。
-// 注意：experimentArmOf 吃的是 **sessionKey（哈希）**，不是 session id。测试夹具里 agentFor('session-one')
-// 的 id 是 'session-one'，host 会把它哈希成 8 位十六进制——所以这里必须用同一个哈希，否则会拿错臂。
-const sessionKeyOne = createHash('sha256').update('session-one').digest('hex').slice(0, 8)
-const someTreatment = (() => { for (let turn = 1; turn < 400; turn += 1) if (experimentArmOf(sessionKeyOne, turn) === 'treatment') return turn; return 1 })()
-const someControl = (() => { for (let turn = 1; turn < 400; turn += 1) if (experimentArmOf(sessionKeyOne, turn) === 'control') return turn; return 2 })()
-ok('夹具拿到了一 treatment 一 control 两个不同回合', someTreatment !== someControl, someTreatment + ' vs ' + someControl)
+// ── 1) HIGH 时：注入与否由**会话臂**决定，且提示只在 treatment 出现 ─────────────
+const agentT = agentFor(TREATMENT_FIXTURE)
+const agentC = agentFor(CONTROL_FIXTURE)
 const base = enter(highTask)
-const injected = await preStep({ agent, messages: base.messages, turn: someTreatment, step: 1, signal: undefined }, base)
-ok('treatment 回合的决策被替换（messages 多了一条）', injected !== base && Array.isArray(injected.messages) && injected.messages.length === base.messages.length + 1, JSON.stringify(injected.messages.length))
+const injected = await preStep({ agent: agentT, messages: base.messages, turn: 11, step: 1, signal: undefined }, base)
+ok('treatment 会话的决策被替换（messages 多了一条）', injected !== base && Array.isArray(injected.messages) && injected.messages.length === base.messages.length + 1, JSON.stringify(injected.messages.length))
 const controlTurn = enter(highTask)
-const controlOut = await preStep({ agent, messages: controlTurn.messages, turn: someControl, step: 1, signal: undefined }, controlTurn)
-ok('control 回合的决策原样返回（**这是真正的对照组**）', controlOut === controlTurn, 'messages=' + controlOut.messages.length)
+const controlOut = await preStep({ agent: agentC, messages: controlTurn.messages, turn: 11, step: 1, signal: undefined }, controlTurn)
+ok('control 会话的决策原样返回（**这是真正的对照组**）', controlOut === controlTurn, 'messages=' + controlOut.messages.length)
 const hint = injected.messages[injected.messages.length - 1]
 ok('注入的是 user 角色消息', hint !== undefined && hint.role === 'user', JSON.stringify(hint && hint.role))
 ok('content 是 [{type:"text", text}] 形状', Array.isArray(hint.content) && hint.content[0] && hint.content[0].type === 'text' && typeof hint.content[0].text === 'string')
@@ -188,7 +200,7 @@ ok('tier NONE（中文无 token）不注入', zhOut === zh, 'messages=' + zhOut.
 
 // ── 4) 遥测如实记录 injected 与实测 hint 字节数 ────────────────────────────────
 const lines = () => readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
-const turn11 = lines().find((r) => r.turn === someTreatment && r.kind === undefined)
+const turn11 = lines().find((r) => r.turn === 11 && r.kind === undefined)
 ok('记录标 injected: true', turn11 !== undefined && turn11.injected === true, JSON.stringify(turn11 && turn11.injected))
 ok('hintBytes 是实测的正数，且与真实提示长度一致', turn11 !== undefined && turn11.hintBytes === Buffer.byteLength(hintText, 'utf8'), JSON.stringify({ recorded: turn11 && turn11.hintBytes, actual: Buffer.byteLength(hintText, 'utf8') }))
 const turn13 = lines().find((r) => r.turn === 13)
@@ -215,7 +227,8 @@ ok('回合结束后写出 turn-calls 记录', calls12 !== undefined, JSON.string
 ok('三个技能工具分别计数', calls12 !== undefined && calls12.skillSearchCalls === 1 && calls12.skillLoadCalls === 1 && calls12.skillRefCalls === 0, JSON.stringify(calls12))
 ok('原生 skill 工具单独计数（常驻目录 ≠ 库）', calls12 !== undefined && calls12.residentSkillCalls === 1, JSON.stringify(calls12 && calls12.residentSkillCalls))
 ok('其它工具汇总，不逐个记名', calls12 !== undefined && calls12.otherToolCalls === 3, JSON.stringify(calls12 && calls12.otherToolCalls))
-ok('turn-calls 记录带 tier 与 injected，便于 A/B 对齐', calls12 !== undefined && calls12.tier === 'HIGH' && calls12.injected === true, JSON.stringify(calls12 && { t: calls12.tier, i: calls12.injected }))
+// 分臂现在是**按会话**的，所以这里不能断言 injected 一定为 true——要看该会话被分到哪一臂。
+ok('turn-calls 记录带 tier、arm 与 injected，便于对齐实验臂', calls12 !== undefined && calls12.tier === 'HIGH' && ['treatment', 'control'].includes(String(calls12.arm)) && calls12.injected === (calls12.arm === 'treatment'), JSON.stringify(calls12 && { t: calls12.tier, a: calls12.arm, i: calls12.injected }))
 ok('turn-calls 记录里没有工具参数、没有技能正文', calls12 !== undefined && JSON.stringify(calls12).includes('arguments') === false, JSON.stringify(calls12))
 
 // ── 6) 计数按回合归零（不会把上一回合的数带过来）───────────────────────────────

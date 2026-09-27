@@ -302,7 +302,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 ### 7. Backup and quarantine
 
 - **Back the library up.** It is your capability set, usually assembled from several upstream repos. If those repos are re-cloneable, the minimum is `skill-index.tsv` plus your admission notes.
-- **Quarantine first, investigate second.** Move a suspicious directory out of the library root (say `.skill-src\_quarantine\`) and regenerate the index; it disappears without uninstalling anything. For an audit, `node tools/audit-library-risk.mjs <library-root>` counts risky patterns separately for code blocks and prose — only the former is what a model may copy and run.
+- **Quarantine first, investigate second.** Move a suspicious directory out of the library root (say `.skill-src\_quarantine`) and regenerate the index; it disappears without uninstalling anything. For an audit, `node tools/audit-library-risk.mjs <library-root>` counts risky patterns separately for code blocks and prose — only the former is what a model may copy and run.
 
 ## Tool reference
 
@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.14.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.14.0 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.15.0 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -506,49 +506,6 @@ By default only **counts** are recorded, never the words — a keyword can carry
 
 Or the environment variable `DSH_SKILL_ROUTER_DEBUG_TOKENS=1` (both paths kept, because whether cordis hands a mounted row its config is not something this repo has verified). With it on, records gain a `tokensUsed` field.
 
-### Randomised arms: why "not injected" is not a control group
-
-An earlier version treated non-injected turns as the control. **They are not one.** Injection is decided *by* the tier, so the two groups are different task populations by construction:
-
-```
-injected:   run a semgrep security audit  -> clear candidates -> injected=true
-"control":  what is the weather           -> no candidates    -> injected=false
-```
-
-A difference in search rate between them says nothing about the hint — **every difference is attributable to the tasks being different**.
-
-The question is far narrower, and only a randomised arm answers it:
-
-> **Among tasks the system already considers high quality, does merely showing the candidates change what the agent does?**
-
-So after `tier === HIGH`, the arm is drawn:
-
-```
-HIGH opportunity
-      ↓
-sha256(sessionKey + ":" + turn) -> roughly 50/50
-   ↙                    ↘
-control               treatment
-no hint                hint
-```
-
-**Why a hash and not a random number**: a conversation cannot flip arms on a retry or a replayed step; there is no RNG state to persist; nothing about the user or the task enters the choice (only an identifier already hashed beyond recovery); and the split is reproducible from the log alone.
-
-**Why per turn and not per session**: both arms then draw from the *same* conversation, so capabilities, tools and context are matched and only the hint varies. Session-level randomisation would confound the arm with how capable that conversation happened to be.
-
-**The cost, stated plainly**: half of all HIGH opportunities get **no hint**. If the hint works, this experiment actively withholds a working aid from those turns while it runs — the price of a causal answer instead of a correlated one, which is why it is the owner's explicit decision rather than a silent default.
-
-### The experiment protocol
-
-```
-① restart DSH, record the start time T0
-② freeze skill-index (usable skills should stay 1025; if it changes, this batch is void)
-③ collect >= 50 unique, pairable HIGH opportunities (roughly half per arm)
-④ node tools/discovery-report.mjs --since <T0>
-```
-
-`--since` is required: legacy records have no `sessionKey` and are reported as "unreliable pairing", but **only the analysis window actually keeps them out of the denominator**.
-
 ### Telemetry now records two things, because they answer two questions
 
 ```json
@@ -562,6 +519,73 @@ no hint                hint
 **The first is written at `step === 1`, when nobody can yet know whether the turn will search** — so "did the hint make the agent search" has to be answered by the second, and the two are joined by **`(sessionKey, turn)`** — not `turn`, since 14 turn numbers were measured duplicated across sessions. The second records **counts only**: no tool arguments, no skill bodies, no user text.
 
 Per-turn counting settles at the **next turn's first step**, because this harness has no hookable end-of-turn waterfall (verified: `agent/turn-stopping` does not exist in `0.1.7-rc.2`, so hooking it would have been instrumentation that never runs). A turn abandoned mid-flight loses its numbers rather than misattributing them — the right failure direction for a measurement.
+
+### Randomised arms: why "not injected" is not a control, and why the unit is the SESSION
+
+An earlier version treated non-injected turns as the control. **They are not one.** Injection is decided *by* the tier, so the two groups are different task populations by construction:
+
+```
+injected:   run a semgrep security audit  -> clear candidates -> injected=true
+"control":  what is the weather           -> no candidates    -> injected=false
+```
+
+A difference in search rate between them is attributable to the tasks being different, not to the hint.
+
+The question is far narrower:
+
+> **Among tasks the system already considers high quality, does merely showing the candidates change what the agent does?**
+
+**And the intervention is durable**, which decides the unit. `dsh-agent-loop` lands the step's messages on the session like this:
+
+```js
+this.session.append('user/message', message, { surfaceOp: 'append' })
+```
+
+`surfaceOp: 'append'` means the hint joins the session surface, and every later step derives its history from that (observed directly: an injected hint appears in a session projection as a `skill-router` surface node of about 90 tokens).
+
+So **per-turn arms are wrong**, and wrong in one direction only:
+
+```
+turn 10  treatment  ->  hint enters the session surface
+turn 11  control    ->  no new hint, but turn 10's hint is still in context
+```
+
+Treatment contaminates every later control opportunity while control never contaminates treatment — a bias in a known direction, with numbers that look entirely normal.
+
+**So the unit is the session:**
+
+```
+session
+   ↓
+sha256(sessionKey) -> roughly 50/50
+   ↙                    ↘
+control               treatment
+no HIGH in this        every HIGH in this
+session gets a hint    session gets one
+```
+
+A control session never receives a hint at all, so nothing of the intervention can leak into any of its opportunities.
+
+**The cost**: the two arms are now different conversations, so they may differ in capability or context. That is the trade once the intervention persists — matching within one conversation is only worth having if the arms are still independent, and per-turn arms are not.
+
+### The unit of measurement: each session's FIRST HIGH
+
+Even with a per-session arm, later opportunities inside one session are not independent samples: the agent searched once, learned a skill, and its later turns are shaped by that. So the primary metric counts only **each session's first eligible opportunity** — the one observation that provably precedes any hint this experiment could have shown, because at that point nothing has been injected.
+
+The plugin marks `firstEligible` on every record; the readout reports the primary metric over those, and lists the exploratory (same-session later) and pooled numbers separately, labelled as unusable for causal conclusions.
+
+### The experiment protocol
+
+```
+① restart DSH, record the start time T0
+② freeze skill-index (usable skills should stay 1025; if it changes, this batch is void)
+③ collect >= 50 SESSIONS, each with exactly one pairable first observation (roughly half per arm)
+④ node tools/discovery-report.mjs --since <T0>
+```
+
+Note that step ③ counts **sessions**, not turns: the gate is 50 sessions each holding one pairable first HIGH opportunity.
+
+`--since` is required: legacy records have no `sessionKey` and are reported as "unreliable pairing", but **only the analysis window actually keeps them out of the denominator**.
 
 Three success metrics, in causal order: **① does the agent start calling `skill_search` after a HIGH hint** (the trigger hypothesis) → **② does it then actually `skill_load`** (the candidates produced behaviour, not just a glance) → **③ is the loaded skill relevant to the task** (manual sampling).
 
@@ -613,7 +637,7 @@ Thirty dependency-free scripts. They run against a real staged library when one 
 | `stale-and-duplicates.mjs` | a stale index (directory deleted) no longer makes `skill_search` throw and is flagged `stale`; the repo list for a duplicated name is visible to the model; weak matches are not offered as hits |
 | `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
-| `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry **by randomised arm** (treatment vs control, never "injected vs not", which would be different task populations) and and keeps **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions), deduped per turn for real (several discovery records collapse to the last, several counting records are summed, or one turn counts twice in numerator and denominator); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
+| `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry **by randomised session arm** (treatment vs control, never "injected vs not", which would be different task populations) with the primary metric over **each session's first HIGH** (the only observation that provably precedes any hint) and and keeps **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions), deduped per turn for real (several discovery records collapse to the last, several counting records are summed, or one turn counts twice in numerator and denominator); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
 | `discovery-ranking.mjs` | the **candidate-generator quality guard**: corpus-frequency filtering (a word carried by every row cannot score, `corpusFrequency` reports the ratio, the 80% boundary keeps and >80% drops, and an all-common task reports `no-discriminating-token`), dedupe by skill name (one slot per name, best-scoring copy kept), **tier computed over the deduped effective tokens** (a 100%-frequency word cannot forge HIGH), and genuine strong candidates still reaching HIGH; against a real library it samples that `skill`/`skills` really are 100% words, that a security-audit task ranks `semgrep` first, that a code-review task ranks `code-review` first, and that no candidate list repeats a name |
 | `discovery-injection.mjs` | the discovery wiring (**HIGH injection + per-turn tool counting**): injection happens only at `tier === HIGH` and `step === 1`, the injected message shape is valid (`role`/`content`/`source`/**unique `id`**), two injections differ in id, `step=2` and NONE do not inject, and the original messages are untouched; telemetry records `injected` and a **measured** `hintBytes`; tool calls are counted **per turn after the turn ends** (the three skill tools separately, the native `skill` tool separately, everything else only in aggregate), with counters reset per turn and no tool arguments or skill bodies in the record |
 | `build-index.mjs` | the index generator: **every row resolves to an existing `SKILL.md` by the plugin's own path rule** (the first version added an extra `repo/` level, so 1,028 rows matched 1,028 while zero resolved — counting cannot catch that), `.git`/`node_modules` skipped, BOM/CRLF/block scalars/missing name/missing description, TSV escaping for tabs and quotes, `whenToUse` written only when needed, and the CLI's three `--check` states including CRLF not counting as drift; against a real library it re-checks every row and compares key sets with the existing index |

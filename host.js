@@ -1518,25 +1518,66 @@ function taskTextOf(messages) {
 const CONTROL_SHARE = 0.5
 
 /**
- * Which arm of the experiment a HIGH opportunity falls into: `'treatment'` or `'control'`.
+ * Which arm of the experiment a **session** falls into: `'treatment'` or `'control'`.
  *
  * Exported because it is the single most important thing to be able to test about this experiment:
  * if the split were biased, or not deterministic, every number the readout produces would be
  * meaningless while still looking plausible.
  *
- * `sha256(sessionKey + ':' + turn)` rather than a random number, so that:
+ * ── why the unit is the session, not the turn ────────────────────────────────────────────
+ *
+ * An earlier version randomised per turn. That is wrong here, and not for a statistical taste
+ * reason: **the intervention is durable.** Verified in the harness rather than assumed —
+ * `dsh-agent-loop` appends the step's messages with
+ *
+ *     this.session.append('user/message', message, { surfaceOp: 'append' })
+ *
+ * so the hint lands on the session surface and is part of the history every later step derives from.
+ * (Observed directly: an injected hint appears in a session projection as a `skill-router` surface
+ * node carrying ~90 tokens.)
+ *
+ * With per-turn arms that makes the "control" group a lie in one direction only:
+ *
+ *     turn 10  treatment  ->  hint enters the session surface
+ *     turn 11  control    ->  no NEW hint, but the turn-10 hint is still in context
+ *
+ * so treatment contaminates every later control opportunity, while control never contaminates
+ * treatment. Pooling those turns would bias the comparison in a known direction and the resulting
+ * number would look perfectly reasonable.
+ *
+ * Randomising per session removes that path entirely: a control session never receives a hint, so
+ * nothing of the intervention can leak into any of its opportunities.
+ *
+ * The cost is that the two arms are now different conversations rather than the same one, so they may
+ * differ in capability or context. That is the trade that has to be made once the intervention
+ * persists — matching within a conversation is only worth having if the arms are still independent,
+ * and per-turn arms are not.
+ *
+ * ── and the unit of MEASUREMENT is the session's first eligible opportunity ──────────────
+ *
+ * Even with a per-session arm, later opportunities inside one session are not independent samples:
+ * the agent searched once, learned a skill, and its later turns are shaped by that. The first
+ * eligible opportunity of a session is the one observation guaranteed to precede any hint ever
+ * being shown, so it is the clean unit. The plugin records `firstEligible` per record; the readout
+ * reports the primary metric over first opportunities and treats all-opportunity numbers as
+ * exploratory.
+ *
+ * `sha256(sessionKey)` rather than a random number, so that:
  *   * one conversation cannot flip arms on a retry or a replayed step;
  *   * there is no RNG state to persist;
  *   * nothing about the user or the task enters the choice — only an identifier already hashed
  *     beyond recovery;
  *   * the split is reproducible from the log alone.
  *
- * Per turn rather than per session, deliberately: both arms then draw from the *same* conversation,
- * so capabilities, tools and context are matched and only the hint varies. Session-level
- * randomisation would confound the arm with "how capable this conversation happened to be".
+ * ── the cost, stated plainly ────────────────────────────────────────────────────────────
+ *
+ * Half of all sessions get **no hint at all**, for their entire length. If the hint is effective,
+ * this experiment withholds a working aid from those sessions while it runs, and that is a heavier
+ * cost than withholding it from half the turns. It is the price of a causal answer instead of a
+ * correlated one, and it is the owner's decision, not a silent default.
  */
-export function experimentArmOf(sessionKey, turn) {
-  const digest = createHash('sha256').update(String(sessionKey) + ':' + String(turn)).digest('hex')
+export function experimentArmOf(sessionKey) {
+  const digest = createHash('sha256').update(String(sessionKey)).digest('hex')
   // First 8 hex digits -> [0,1); 16^8 is far above the precision a coin flip needs.
   return parseInt(digest.slice(0, 8), 16) / 0x100000000 < CONTROL_SHARE ? 'control' : 'treatment'
 }
@@ -1609,40 +1650,14 @@ export function apply(ctx, config) {
   const INJECT_TIERS = new Set(['HIGH'])
 
   /**
-   * Which arm of the experiment a HIGH opportunity falls into.
+   * Whether this session has already had its first eligible opportunity.
    *
-   * ── why a randomised control arm exists at all ──────────────────────────────────────────
-   *
-   * The first version of this measurement compared `tier === HIGH` turns against everything else and
-   * called the latter a control group. It is not one. Injection is decided *by* the tier, so the two
-   * groups were different task populations by construction — "run a semgrep security audit" against
-   * "what is the weather". A difference in search rate between them says nothing about the hint.
-   *
-   * The question is narrower, and only a randomised arm answers it: **among tasks the system already
-   * considers high quality, does merely showing the candidates change what the agent does?** Both
-   * arms are HIGH, both are computed identically, and the only difference is whether the hint is
-   * appended to the step.
-   *
-   * ── why a hash and not a random number ──────────────────────────────────────────────────
-   *
-   * `sha256(sessionKey + ':' + turn)` is deterministic, so:
-   *   * one conversation cannot flip arms on a retry or a replayed step;
-   *   * there is no RNG state to persist anywhere;
-   *   * nothing about the user or the task enters the choice — only an identifier already hashed
-   *     beyond recovery;
-   *   * the split is reproducible from the log, so the readout can re-derive an arm if a record
-   *     predates the field.
-   *
-   * Per turn rather than per session, deliberately: both arms then draw from the *same* conversation,
-   * so capabilities, tools and context are matched and only the hint varies. Session-level
-   * randomisation would confound the arm with "how capable this conversation happened to be".
-   *
-   * ── the cost, stated plainly ────────────────────────────────────────────────────────────
-   *
-   * Half of all HIGH opportunities get **no hint**. If the hint is effective, this experiment
-   * actively withholds a working aid from those turns for as long as it runs — the price of a causal
-   * answer instead of a correlated one. That is a decision for the owner, not a silent default.
+   * The experimental unit is **one session, one opportunity** — see `experimentArmOf`. Tracking the
+   * first is what makes the primary measurement interpretable, and it is recorded rather than derived
+   * because "first" is a property of the session's history, not of any single record.
    */
+  const firstEligibleSeen = new Set()
+
   // Writing the task's own keywords to disk off by default: a keyword can carry a project, a
   // customer or a vulnerability name. `ctx.config` first (so a patch row can set it) with an env
   // var as the fallback, because whether cordis hands a mounted row its config is not something
@@ -1725,11 +1740,18 @@ export function apply(ctx, config) {
         const started = Date.now()
         const cwd = agent === undefined || agent === null ? '' : String(agent.session.header.cwd ?? '')
         const result = await router.discover(taskText, cwd, signal)
-        // Eligible means "the system considers this high quality". The arm is then drawn from the
-        // hash, and ONLY that decides whether the hint goes out — so both arms are the same kind of
-        // task by construction, which is what the earlier HIGH-vs-everything-else comparison lacked.
+        // Eligible means "the system considers this high quality". The arm belongs to the SESSION (see
+        // `experimentArmOf` for why per-turn arms were wrong), and only the arm decides whether the
+        // hint goes out — so both arms are the same kind of task by construction, which is what the
+        // earlier HIGH-vs-everything-else comparison lacked.
         const eligible = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
-        const arm = eligible ? experimentArmOf(sessionKey, turn) : 'not-eligible'
+        const arm = eligible ? experimentArmOf(sessionKey) : 'not-eligible'
+        // The session's FIRST eligible opportunity is the primary experimental unit: it is the only
+        // observation that provably precedes any hint this experiment could have shown, so nothing
+        // durable can have leaked into it. Later ones are recorded (and reported separately) but they
+        // are not independent samples once the agent has searched and learned something.
+        const firstEligible = eligible && firstEligibleSeen.has(sessionKey) === false
+        if (eligible) firstEligibleSeen.add(sessionKey)
         const inject = eligible && arm === 'treatment'
         const hint = inject ? discoveryHint(result) : ''
         perSession.set(sessionKey, { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, arm, calls: {}, other: 0 })
@@ -1741,6 +1763,7 @@ export function apply(ctx, config) {
             elapsedMs: Date.now() - started,
             indexRows: result.indexRows,
             injected: inject,
+            firstEligible,
             // `arm` is the assignment, `injected` is what actually happened. Kept as two fields so a
             // control turn that somehow carried a hint would be visible rather than invisible.
             arm,

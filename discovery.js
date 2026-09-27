@@ -122,6 +122,9 @@ export function discoveryRecord(input) {
     // Recorded next to `injected` rather than derived from it, because the whole point of the arm is
     // that it was decided independently of the outcome.
     arm: typeof source.arm === 'string' && source.arm !== '' ? source.arm : null,
+    // True for the session's FIRST eligible opportunity — the primary experimental unit, and the only
+    // observation that provably precedes any hint this experiment could have shown.
+    firstEligible: source.firstEligible === true,
     // How many bytes the hint actually added to this turn's context. Recorded rather than
     // assumed: the whole case for injecting rests on this number being small, and an estimate
     // in a design note is not evidence. 0 when nothing was injected.
