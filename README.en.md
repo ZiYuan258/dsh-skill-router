@@ -366,7 +366,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.15.3 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.15.4 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -415,7 +415,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.15.3 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.15.4 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -473,16 +473,28 @@ The cost is why it is worth trying:
 |---|---|
 | the resident skill catalog | ~3,238 |
 | the three tool schemas | ~1,001 |
-| **injecting 5 candidates (new in this version)** | **329–341 bytes ≈ 91–95 (measured on a real library)** |
+| **injecting 5 candidates (new in this version)** | **532–549 bytes ≈ 148–152 (measured on a real library)** |
 
 ### What gets injected
 
 ```
-Maybe relevant skills for this task: semgrep (name, whenToUse); code-review (name).
+Maybe relevant skills for this task: semgrep — Runs a Semgrep security scan over a codebase: detects langu…; code-review-and-quality — Conducts multi-axis code review. Use before merging any cha….
 Load any that fit with skill_load, or ignore this and continue without one.
 ```
 
-**Names and matched fields only, never the descriptions** — the byte budget *is* the design. And it says explicitly that ignoring it is fine: this layer **discovers**, the agent still chooses.
+**The name plus a real description, capped at 60 characters.** And it says explicitly that ignoring it is fine: this layer **discovers**, the agent still chooses.
+
+> **This slot used to read `(name, description, path)` — which is not a description, it is the list of fields that matched.**
+>
+> In a measurement over 467 candidates, **304** matched all three fields, so nearly every line rendered the
+> same parenthetical: a literal. The model got five unfamiliar names with no statement of purpose, which
+> left it **nothing to judge relevance by**; the observed behaviour was to continue with
+> `read`/`edit`/`pwsh`, and telemetry showed 14 injections with **zero** library loads following them.
+>
+> The code meant to show what the matched fields *say* and literally rendered their names instead. So this
+> is not a feature, it is a rendering bug fixed: the hint goes from **zero information** back to
+> **information**. The cost is ~57 more bytes per injected turn (329–341 → 532–549), and what it buys is
+> the end of an injection that was paid for every turn and returned nothing.
 
 Two implementation details, both verified in the harness rather than assumed:
 

@@ -372,7 +372,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.15.3 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.15.4 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -420,7 +420,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.15.3 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.15.4 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -478,16 +478,26 @@ tier === HIGH → 一句话摆到模型面前；其余什么都不做
 |---|---|
 | 常驻技能目录 | ~3,238 |
 | 三个工具 schema | ~1,001 |
-| **注入 5 个候选（本版新增）** | **329–341 字节 ≈ 91–95（实测真库）** |
+| **注入 5 个候选（本版新增）** | **532–549 字节 ≈ 148–152（实测真库）** |
 
 ### 注入的是什么
 
 ```
-Maybe relevant skills for this task: semgrep (name, whenToUse); code-review (name).
+Maybe relevant skills for this task: semgrep — Runs a Semgrep security scan over a codebase: detects langu…; code-review-and-quality — Conducts multi-axis code review. Use before merging any cha….
 Load any that fit with skill_load, or ignore this and continue without one.
 ```
 
-**只有名字与命中的字段，没有描述正文**——字节预算就是设计本身。并且明确写着"可以都不用"：这一层负责**发现**，选择仍然在 Agent 手里。
+**名字 + 截到 60 字符的真实描述**。并且明确写着"可以都不用"：这一层负责**发现**，选择仍然在 Agent 手里。
+
+> **这一栏曾经是 `(name, description, path)`，而那不是描述，是命中的字段名。**
+>
+> 实测 467 个候选里 **304 个**的三个字段全部命中，于是提示行几乎每一行都渲染成同一个括号——
+> 一个写在括号里的字面量。模型拿到五个陌生技能名，没有任何用途说明，**判断相关性的依据为零**；
+> 观察到的行为是原样继续 `read`/`edit`/`pwsh`，遥测侧 14 次注入对应 **0 次库加载**。
+>
+> 代码本意是"显示命中的字段内容"，字面实现成了"显示字段名"。所以这不是加了功能，是修了一个
+> 渲染错误：提示从**零信息量**回到**有信息量**。代价是每个注入回合多 ~57 字节（329–341 →
+> 532–549），而这个代价换掉的是"每一轮都在付、且拿不到任何回报"的注入。
 
 两处已经取证过的实现细节：
 

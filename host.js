@@ -591,10 +591,15 @@ export function discoverRows(rows, taskText, limit) {
     score: hit.score,
     matched: hit.matchCount,
     nameHits: hit.nameHits,
-    // WHICH fields matched, not why the agent should care — names only, no prose, because the
-    // injection budget is the whole point (measured on the real library: 329–341 bytes, ~91–95
-    // tokens, for five candidates — not the ~57 an earlier note estimated from short sample names).
+    // WHICH fields matched — telemetry only, and never rendered. Its one attempt at display
+    // produced `name (name, description, path)` on 304 of 467 measured candidates: the field
+    // NAMES where the hint meant to show what those fields SAY. See `discoveryHint`.
     fields: matchedFields(hit.row, effectiveTokens),
+    // What the hint actually shows. `description` is the only field in the index that states a
+    // skill's PURPOSE, so it is the only thing that can answer the model's question — "is this
+    // worth opening?" — and the previous field-name rendering answered it with nothing. The
+    // display cap lives in `discoveryHint`, so no per-candidate budget is decided here.
+    description: String(hit.row.description ?? ''),
   }))
 
   // Tier is computed over the DEDUPED ranking, and over effective tokens only.
@@ -1582,9 +1587,39 @@ export function experimentArmOf(sessionKey) {
   return parseInt(digest.slice(0, 8), 16) / 0x100000000 < CONTROL_SHARE ? 'control' : 'treatment'
 }
 
-/** The one-line hint. Names and matched fields only — the byte budget is the design. */
+/**
+ * Characters of a candidate's description the hint may show.
+ *
+ * ── why a description is shown at all ───────────────────────────────────────────────────
+ *
+ * The hint used to render the matched field NAMES: `semgrep (name, description, path)`. On 304 of
+ * 467 measured candidates every field matched, so the parenthetical was identical for nearly every
+ * line — a literal, not a description. With five unfamiliar names and no statement of what any of
+ * them does, the model had nothing to judge relevance by, and the observed outcome was the one that
+ * costs nothing: continue with `read`/`edit`/`pwsh`. The telemetry agrees — 14 injections, zero
+ * library loads that followed.
+ *
+ * A name alone cannot be judged; a purpose can. 60 characters is enough for the first clause of a
+ * real description ("Static analysis security review for source code"), and it is the byte budget
+ * that decides the number, not the other way round.
+ */
+const HINT_DESCRIPTION_CHARS = 60
+
+/**
+ * The one-line hint. Names and a capped description each — the byte budget is still the design.
+ *
+ * Measured on the real library: 532–549 bytes across three tasks, against 327–344 for the
+ * field-name version — ~57 more bytes per injected turn. That is deliberate: the cheap version was
+ * cheap because it said nothing. (Not the ~700–900 first estimated before rendering it: `truncate`
+ * cuts at a character count, and most real descriptions hit that cap.)
+ * `cleanDescription` (index parse) and whitespace collapsing are already applied upstream, so a
+ * description cannot smuggle newlines or a YAML block marker into a one-line message.
+ */
 function discoveryHint(result) {
-  const parts = result.candidates.map((c) => (c.fields.length === 0 ? c.name : c.name + ' (' + c.fields.join(', ') + ')'))
+  const parts = result.candidates.map((c) => {
+    const why = cleanDescription(c.description)
+    return why === '' ? String(c.name) : String(c.name) + ' — ' + truncate(why, HINT_DESCRIPTION_CHARS)
+  })
   return (
     'Maybe relevant skills for this task: ' + parts.join('; ') + '. ' +
     'Load any that fit with skill_load, or ignore this and continue without one.'

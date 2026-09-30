@@ -186,6 +186,19 @@ ok('原文消息未被改动（只在末尾追加）', injected.messages[0] === 
 const hintText = String(hint.content[0].text)
 ok('提示里含候选名与"可以都不用"的许可', hintText.includes('semgrep') && /ignore this/i.test(hintText), hintText.slice(0, 90))
 
+// 提示必须说清"这技能是干什么的"，而不是复述"命中了哪些字段"。
+//
+// 这条断言来自一次实测的事故：渲染 `c.fields` 让 467 个候选里的 304 个都显示成
+// `(name, description, path)` —— 字段**名**代替了字段**内容**，于是五行提示的信息量是零。
+// 模型看到五个陌生名字、没有任何用途说明，行为是原样继续 read/edit/pwsh；遥测侧 14 次注入
+// 对应 0 次库加载。判据因此是"描述文本本身在提示里"，而不是"提示非空"。
+// 只断言**实际出现的那个候选**。第一版同时断言了夹具里两个技能的描述，直接红了——那个任务是
+// `semgrep security audit`，只有 semgrep 是候选（`Evidence before claims` 属于另一个技能，从来
+// 不在这一行提示里）。断言写了"提示应当包含不存在的东西"，那个红是夹具错了，不是代码错了。
+ok('提示里是候选的真实描述（不是命中字段名）', hintText.includes('semgrep ' + String.fromCharCode(0x2014) + ' Static analysis security review for source code'), hintText.slice(0, 160))
+ok('不再出现字段名占位符 (name, description, path)', hintText.includes('(name, description, path)') === false && /\(name\b|whenToUse/.test(hintText) === false, hintText.slice(0, 160))
+ok('名与描述之间是可见分隔符（不是靠括号）', hintText.includes('semgrep ' + String.fromCharCode(0x2014) + ' '), hintText.slice(0, 90))
+
 // 两次注入的 id 必须不同（同一个 id 会让下游无法区分）
 const again = await preStep({ agent, messages: enter(highTask).messages, turn: 12, step: 1, signal: undefined }, enter(highTask))
 const second = again.messages[again.messages.length - 1]
