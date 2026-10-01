@@ -121,23 +121,42 @@ ok('坏行不影响其余记录', p6.paired.length === 1)
 const s7 = summarise(pairTurns([disc(1, 'HIGH', { indexRows: 1025 }), call(1, 1, 1), disc(2, 'HIGH', { indexRows: 1028 }), call(2, 1, 1)].join('\n')))
 ok('多个 indexRows 取值被收集起来', s7.indexRows.length === 2 && s7.indexRows.includes(1025) && s7.indexRows.includes(1028), JSON.stringify(s7.indexRows))
 
-// ── 7b) 会话创建时间闸：主指标只收 T0 之后新建的会话 ──────────────────────────
+// ── 7b) 准入闸：主指标只收**历史里没有 T0 前提示**的会话 ────────────────────────
 //
 // 这一条来自一个**协议级**污染：firstEligibleSeen 是插件进程内存，重启即清空，而 session 是持久、
 // 可 resume 的。所以"实验前就存在、重启后继续用"的会话，会把它的下一个 HIGH 呈现为"本会话第一个"。
-// 污染没消失，只是从跨回合变成了跨进程。闸门的判据是 sessionCreatedAt >= T0。
+// 污染没消失，只是从跨回合变成了跨进程。
+//
+// ── 判据改过一次，这里记下为什么 ────────────────────────────────────────────────
+//
+// 第一版的判据是 `sessionCreatedAt >= T0`——"会话必须是 T0 之后新建的"。它想排除的是**残留**，
+// 而出生时间只是残留的**代理**，两个方向都会错：出生在 T0 前但**从未被注入**的会话历史是干净的
+// （实测 `e93c0e04`：T0 前 0 次注入，重启后 resume 拿到一个干净的 control 观测，被白白扔掉）；
+// 反过来，出生在 T0 后但同进程内已被注入的会话，这条判据根本管不到。
+//
+// 所以现在判的是污染本身：`carryoverSessions`（T0 前有过 injected:true 的会话）里的会话一律排除，
+// 其余的按出生时间分两类，但**都准予进入**主指标。这个集合必须由调用方在按 T0 裁剪日志**之前**算好，
+// 否则裁完就问不出来了。
 const T0 = '2026-06-01T00:00:00.000Z'
 const aged = (turn, createdAt, extra = {}) => disc(turn, 'HIGH', { sessionCreatedAt: createdAt, ...extra })
 const gatePairs = pairTurns([
   aged(1, '2026-07-01T00:00:00.000Z'), call(1, 1, 0),                        // T0 之后新建 → 合格
-  aged(2, '2026-01-01T00:00:00.000Z', { sessionKey: 'old11111' }), call(2, 1, 0, { sessionKey: 'old11111' }),  // T0 之前创建 → 排除
+  aged(2, '2026-01-01T00:00:00.000Z', { sessionKey: 'old11111' }), call(2, 1, 0, { sessionKey: 'old11111' }),  // T0 前创建但从未注入 → 合格（历史干净）
   aged(3, null, { sessionKey: 'unk11111' }), call(3, 1, 0, { sessionKey: 'unk11111' }),                        // 时间未知 → 排除
 ].join('\n'))
 const sGated = summarise(gatePairs, { since: T0 })
-ok('T0 之后新建的会话进入主指标', sGated.experiment.primary.sessions === 1, 'sessions=' + sGated.experiment.primary.sessions)
-ok('T0 之前创建的会话被排除', sGated.experiment.excludedPreT0 === 1, 'preT0=' + sGated.experiment.excludedPreT0)
+ok('T0 之后新建的会话进入主指标', sGated.experiment.primary.sessions === 2, 'sessions=' + sGated.experiment.primary.sessions)
+ok('干净的旧会话被准入（不是按出生时间一刀切）', sGated.experiment.primary.cleanOld === 1, 'cleanOld=' + sGated.experiment.primary.cleanOld)
+ok('T0 之后新建的观测单独计数', sGated.experiment.primary.bornAfterT0 === 1, 'bornAfterT0=' + sGated.experiment.primary.bornAfterT0)
 ok('创建时间未知的会话被排除（不放行）', sGated.experiment.excludedBirthUnknown === 1, 'unknown=' + sGated.experiment.excludedBirthUnknown)
 ok('闸门标记为开', sGated.experiment.birthGate === 'on')
+// **残留**：同一个会话，出生时间再早、只要 T0 前被注入过，就不准进——这才是这道闸的本体。
+const residue = summarise(gatePairs, { since: T0, carryoverSessions: new Set(['old11111']) })
+ok('T0 前被注入过的会话被排除（残留判据生效）', residue.experiment.excludedCarryover === 1, 'carryover=' + residue.experiment.excludedCarryover)
+ok('排除后主指标只剩 T0 之后新建的那个', residue.experiment.primary.sessions === 1 && residue.experiment.primary.cleanOld === 0, JSON.stringify({ sessions: residue.experiment.primary.sessions, cleanOld: residue.experiment.primary.cleanOld }))
+// 回归：不传 carryoverSessions 时不能崩，且行为等同"没有残留"（老调用方的兼容路径）。
+const noCarry = summarise(gatePairs, { since: T0 })
+ok('不传 carryoverSessions 时按"无残留"处理，不抛异常', noCarry.experiment.primary.sessions === sGated.experiment.primary.sessions, 'sessions=' + noCarry.experiment.primary.sessions)
 // 不给 T0 时闸门关闭，且**明确标记为 off**（报告会为此报警）
 const sOpen = summarise(gatePairs)
 ok('未给 T0 时闸门标记为关', sOpen.experiment.birthGate === 'off')
@@ -241,6 +260,43 @@ const future = capture(['--log', logPath, '--json', '--since', '2030-01-01T00:00
 ok('--since 之后的未来时间 → 窗口内为空（旧数据被排除）', JSON.parse(future.text).experiment.primary.sessions === 0)
 const past = capture(['--log', logPath, '--json', '--since', '2000-01-01T00:00:00.000Z'])
 ok('--since 过去时间 → 记录被包含', JSON.parse(past.text).experiment.primary.sessions === 1, 'eligible=' + JSON.parse(past.text).experiment.primary.sessions)
+
+// ── 8b) 残留判定必须在**裁剪之前**算 ──────────────────────────────────────────
+//
+// 这一条只有走 CLI 才测得到：`summarise` 的 `carryoverSessions` 是调用方传进来的，而 CLI 的执行
+// 顺序才是对错所在——它先把 T0 之前的记录**删掉**，而"这个会话 T0 前有没有被注入过"这个问题，
+// 删完就**再也问不出来**了。第一版正是因此把判据退化成了出生时间。
+//
+// 夹具刻意让两种会话的记录形状完全一样（都是"T0 后一个 HIGH 首观测"），唯一的差别在**被裁掉的
+// 那部分日志**里：`res11111` 有一条 T0 前的注入，`fresh111` 没有。所以如果顺序写错，两者都会被
+// 准入，主指标会变成 2——而它应该是 1。
+const carryLog = join(dir, 'carryover.jsonl')
+writeFileSync(carryLog, [
+  // 老会话：T0 前注入过一次（这条会被裁掉，但判定必须看得见它）
+  disc(1, 'HIGH', { at: '2026-01-01T00:00:00.000Z', sessionKey: 'res11111', sessionCreatedAt: '2026-01-01T00:00:00.000Z' }),
+  call(1, 0, 0, { at: '2026-01-01T00:00:00.000Z', sessionKey: 'res11111' }),
+  // 同一个会话在 T0 之后被 resume，拿到一个看起来像"本会话第一个"的 HIGH
+  disc(9, 'HIGH', { at: '2026-07-01T00:00:00.000Z', sessionKey: 'res11111', sessionCreatedAt: '2026-01-01T00:00:00.000Z' }),
+  call(9, 0, 0, { at: '2026-07-01T00:00:00.000Z', sessionKey: 'res11111' }),
+  // 干净的新会话说：T0 之后新建
+  disc(2, 'HIGH', { at: '2026-07-01T00:00:00.000Z', sessionKey: 'fresh111', sessionCreatedAt: '2026-06-15T00:00:00.000Z' }),
+  call(2, 0, 0, { at: '2026-07-01T00:00:00.000Z', sessionKey: 'fresh111' }),
+].join('\n'), 'utf8')
+const carryJson = JSON.parse(capture(['--log', carryLog, '--json', '--since', '2026-06-01T00:00:00.000Z']).text)
+ok('残留会话被排除（判定看见了被裁掉的那条注入）', carryJson.experiment.excludedCarryover === 1, 'carryover=' + carryJson.experiment.excludedCarryover)
+ok('主指标只留干净的那一个会话', carryJson.experiment.primary.sessions === 1, 'sessions=' + carryJson.experiment.primary.sessions)
+ok('被准入的是 T0 之后新建的那个', carryJson.experiment.primary.bornAfterT0 === 1, 'bornAfterT0=' + carryJson.experiment.primary.bornAfterT0)
+// 反向对照：**同一个夹具**去掉那条 T0 前的注入记录，就该放行——证明差别确实来自"残留"而不是出生时间。
+const cleanLog = join(dir, 'no-carryover.jsonl')
+writeFileSync(cleanLog, [
+  disc(9, 'HIGH', { at: '2026-07-01T00:00:00.000Z', sessionKey: 'res11111', sessionCreatedAt: '2026-01-01T00:00:00.000Z' }),
+  call(9, 0, 0, { at: '2026-07-01T00:00:00.000Z', sessionKey: 'res11111' }),
+  disc(2, 'HIGH', { at: '2026-07-01T00:00:00.000Z', sessionKey: 'fresh111', sessionCreatedAt: '2026-06-15T00:00:00.000Z' }),
+  call(2, 0, 0, { at: '2026-07-01T00:00:00.000Z', sessionKey: 'fresh111' }),
+].join('\n'), 'utf8')
+const cleanJson = JSON.parse(capture(['--log', cleanLog, '--json', '--since', '2026-06-01T00:00:00.000Z']).text)
+ok('同一会话没有残留时被准入（不是按出生时间一刀切）', cleanJson.experiment.excludedCarryover === 0 && cleanJson.experiment.primary.sessions === 2, JSON.stringify({ carryover: cleanJson.experiment.excludedCarryover, sessions: cleanJson.experiment.primary.sessions }))
+ok('干净的旧会话被单独标出来', cleanJson.experiment.primary.cleanOld === 1, 'cleanOld=' + cleanJson.experiment.primary.cleanOld)
 
 rmSync(dir, { recursive: true, force: true })
 console.log(problems.length === 0 ? '\n实验读数: OK' : '\n实验读数 FAILED:\n  ' + problems.join('\n  '))

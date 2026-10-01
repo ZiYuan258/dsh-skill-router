@@ -591,7 +591,7 @@ The plugin marks `firstEligible` on every record; the readout reports the primar
 ```
 ① restart DSH, record the start time T0
 ② freeze skill-index (usable skills should stay 1025; if it changes, this batch is void)
-③ **admit only sessions created after T0** — do not resume an existing session
+③ **do not resume an existing session** — but what is excluded is **residue**, not age (see below)
 ④ collect >= 50 SESSIONS, each with exactly one pairable first observation (roughly half per arm)
 ⑤ node tools/discovery-report.mjs --since <T0>
 ```
@@ -600,7 +600,7 @@ Note that step ④ counts **sessions**, not turns: the gate is 50 sessions each 
 
 `--since` is required: legacy records have no `sessionKey` and are reported as "unreliable pairing", but **only the analysis window actually keeps them out of the denominator**.
 
-### Why step ③ is hard: a restart is not an experiment reset
+### What step ③ actually excludes: residue, not age
 
 `firstEligibleSeen` is **plugin process memory** and is empty after a DSH restart, while a DSH session is **durable and resumable**. Together:
 
@@ -614,21 +614,33 @@ resume session A
 its next HIGH  ->  firstEligible = true   <- but A already has intervention history
 ```
 
-**The contamination did not disappear — it moved from across turns to across processes.** So the real experiment reset is **a new session, not a restart**.
+**The contamination did not disappear — it moved from across turns to across processes.**
 
-The plugin therefore writes `sessionCreatedAt` on every record (normalised from `session.header.createdAt` to ISO), and the readout applies it as a gate under `--since <T0>`:
+What makes an observation invalid is that **it was exposed**, and "the session was created before T0" is only a **proxy** for that. The proxy errs in both directions:
+
+| | Reality | What the birth-time rule does |
+|---|---|---|
+| false positive | created before T0 but **never** injected: not one hint in its history, so the observation is clean | wrongly excludes it |
+| false negative | created after T0 but already injected inside this same process | the rule never sees it |
+
+So admission judges **the contamination itself**: the session must have no `injected: true` record before T0.
 
 ```
 primary = unique sessionKey
         ∩ firstEligible === true
         ∩ paired
-        ∩ sessionCreatedAt >= T0
+        ∩ **no hint delivered before T0**   <- the actual criterion
+        ∩ sessionCreatedAt is known
         ∩ armViolations === 0
         ∩ duplicateFirsts === 0
         ∩ a single indexRows
 ```
 
-**A session whose creation time cannot be established is excluded**, because admitting it on a guessed time defeats the gate this exists to be. Exclusions are reported in two classes (created before T0 / time unknown) and are **not hidden** from the exploratory and pooled numbers.
+That set has to be computed by the readout **before it trims the log at T0** — once trimmed, "was this session injected before T0?" can no longer be asked.
+
+The report prints admitted observations in two classes (`created after T0` / `created before T0 but never injected`), so you can see how much a clean old session contributed instead of having that hidden behind a blanket "created after T0".
+
+**A session whose creation time cannot be established is still excluded**: a session with an unreadable birth time could be new or could be a resumed old one, and admitting it on a guessed time defeats the gate. Exclusions are reported in two classes (pre-T0 residue / time unknown) and are **not hidden** from the exploratory and pooled numbers.
 
 With no `--since`, the gate is off and the readout says so.
 

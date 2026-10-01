@@ -119,6 +119,11 @@ const calledSomething = (t) => (t.calls.skillSearchCalls ?? 0) + (t.calls.skillL
 /** 汇总成报告对象。 */
 export function summarise(pairs, options) {
   const since = options === null || options === undefined ? undefined : options.since
+  // T0 之前就注入过提示的会话。调用方用**未过滤**的日志算出来。
+  //
+  // 这比"会话创建时间"更贴近污染的定义：真正让观测不合格的不是会话什么时候出生，而是它的历史里
+  // **有没有一条已经投递的提示**。见下面准入那一段。
+  const carryover = options === null || options === undefined || options.carryoverSessions === undefined ? new Set() : options.carryoverSessions
   const tier = {}
   const reason = {}
   for (const t of pairs.discovery) {
@@ -151,17 +156,40 @@ export function summarise(pairs, options) {
   }
   // 每个会话的第一个 eligible opportunity：整个读数的主指标就建立在这上面。
   //
-  // **但"第一个"还不够，会话本身必须是 T0 之后新建的。** `firstEligibleSeen` 是插件进程内存，
+  // **"第一个"还不够——会话的历史必须没有先前的提示。** `firstEligibleSeen` 是插件进程内存，
   // 重启后清空；而 session 是持久、可 resume 的。所以一个**实验前就存在、重启后继续用**的会话，
-  // 可以把它的下一个 HIGH 呈现为"本会话第一个"——污染没有消失，只是从跨回合变成了跨进程。
+  // 可以把它的下一个 HIGH 呈现为"本会话第一个"。
   //
-  // 这条闸只在给了 T0 时才生效（没有 T0 就没有可比的时刻），且**无法确认创建时间的会话一律排除**：
-  // 这道闸存在的意义就是排除它，凭一个猜出来的时间放行等于没有闸。
+  // ── 我第一版把这道闸写成"必须是 T0 之后新建的会话"，那个判据太粗 ────────────────────
+  //
+  // 它想排除的是**残留**：会话历史里还有一条之前投递的提示，于是"观测点"其实已经被暴露过。
+  // 但"会话出生在 T0 之前"只是残留的一个**代理**，而且两个方向都会错：
+  //
+  //   * 假阳性（该放行的被拒）：出生在 T0 前、T0 前**从未**注入过的会话——它的历史里没有任何提示，
+  //     观测点是干净的。实测 `e93c0e04` 就是这种：T0 前 0 次注入，T0 后 resume，在 turn 27 拿到
+  //     `arm=control`、`firstEligible=true`——`arm` 是会话级确定分配，这意味着它**本来就不会**
+  //     被注入。把它当污染排除掉，是把一个干净的 control 观测扔掉。
+  //   * 假阴性（该拒的放行）：出生在 T0 之后、但同一进程内已经被注入过的会话。判据不管这个，
+  //     它只管出生时间。这种情况由 `firstEligible` 覆盖，所以没露出来。
+  //
+  // 所以准入改成**直接判污染，而不是判代理**：会话的历史里在 T0 之前不得有 `injected: true`。
+  // 这个数据没有被丢掉——调用方在**按 T0 裁掉旧记录之前**就该把它算好传进来（`carryoverSessions`）。
+  //
+  // 一道闸要能排除它所声称的东西，而不能只排除它的近似物。
+  //
+  // 这道闸只在给了 T0 时才生效，且**无法确认创建时间的会话一律排除**：一个出生时间读不出来的会话
+  // 既可能是新建的，也可能是重启后 resume 的老会话，凭一个猜出来的时间放行等于没有闸。
   const createdAtOf = (t) => (typeof t.sessionCreatedAt === 'string' ? t.sessionCreatedAt : null)
   const birthKnown = (t) => (createdAtOf(t) === null ? 'unknown' : createdAtOf(t) >= since ? 'ok' : 'pre-T0')
+  const cleanSession = (t) => carryover.has(String(t.sessionKey)) === false
+  const admissionOf = (t) => {
+    if (birthKnown(t) === 'unknown') return 'birth-unknown'
+    if (cleanSession(t) === false) return 'carryover'
+    return birthKnown(t) === 'ok' ? 'born-after-t0' : 'clean-old'
+  }
   const firstCandidates = pairs.paired.filter((t) => t.firstEligible === true && (t.arm === 'treatment' || t.arm === 'control'))
-  const firstPerSession = since === undefined ? firstCandidates : firstCandidates.filter((t) => birthKnown(t) === 'ok')
-  const excludedByBirth = since === undefined ? [] : firstCandidates.filter((t) => birthKnown(t) !== 'ok')
+  const firstPerSession = since === undefined ? firstCandidates : firstCandidates.filter((t) => admissionOf(t) !== 'birth-unknown' && admissionOf(t) !== 'carryover')
+  const excludedByBirth = since === undefined ? [] : firstCandidates.filter((t) => admissionOf(t) === 'birth-unknown' || admissionOf(t) === 'carryover')
   const laterPerSession = pairs.paired.filter((t) => t.firstEligible !== true && (t.arm === 'treatment' || t.arm === 'control'))
   const notEligible = pairs.paired.filter((t) => t.arm === 'not-eligible' || t.arm === null || t.arm === undefined)
   // 分配与执行是否一致：control 会话不该有 hint，treatment 会话不该没有。
@@ -183,6 +211,9 @@ export function summarise(pairs, options) {
         treatment: { ...rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'treatment'), 'skillLoadCalls'), loadGivenSearch: rate(firstPerSession.filter((t) => t.arm === 'treatment' && (t.calls.skillSearchCalls ?? 0) > 0), 'skillLoadCalls') },
         control: { ...rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillSearchCalls'), load: rate(firstPerSession.filter((t) => t.arm === 'control'), 'skillLoadCalls'), loadGivenSearch: rate(firstPerSession.filter((t) => t.arm === 'control' && (t.calls.skillSearchCalls ?? 0) > 0), 'skillLoadCalls') },
         sessions: firstPerSession.length,
+        // 这些观测从哪来。干净的旧会话会稀释"T0 之后出生"的纯度，所以分开报，读者能自己判断。
+        bornAfterT0: firstPerSession.filter((t) => admissionOf(t) === 'born-after-t0').length,
+        cleanOld: firstPerSession.filter((t) => admissionOf(t) === 'clean-old').length,
       },
       // **探索性**：同一会话的后续 opportunity，不独立，只作参考。
       exploratory: {
@@ -201,10 +232,10 @@ export function summarise(pairs, options) {
       armViolations: armViolations.length,
       // 非零即为 bug：同一会话被记了两次 firstEligible，主指标的分母不可信。
       duplicateFirsts,
-      // 被"会话必须是 T0 之后新建"这道闸排除掉的首观测：分"实验前就存在"与"创建时间无法确认"。
+      // 被准入闸排除掉的首观测，按排除原因分开：残留（历史里有 T0 前的提示）与创建时间读不出来。
       birthGate: since === undefined ? 'off' : 'on',
-      excludedPreT0: excludedByBirth.filter((t) => birthKnown(t) === 'pre-T0').length,
-      excludedBirthUnknown: excludedByBirth.filter((t) => birthKnown(t) === 'unknown').length,
+      excludedCarryover: excludedByBirth.filter((t) => admissionOf(t) === 'carryover').length,
+      excludedBirthUnknown: excludedByBirth.filter((t) => admissionOf(t) === 'birth-unknown').length,
     },
     anyCall: pairs.paired.filter(calledSomething).length,
     hintBytes: pairs.paired.filter((t) => t.injected === true).map((t) => t.hintBytes ?? 0),
@@ -387,11 +418,17 @@ export function renderReport(summary) {
   else lines.push('  ' + pad('分配与实际注入一致：', 26) + '是（0 处冲突）')
   if (e.duplicateFirsts > 0) lines.push('  ⚠️ 有 ' + e.duplicateFirsts + ' 个会话被记了多次 firstEligible → 主指标分母不可信')
   if (e.birthGate === 'off') {
-    lines.push('  ⚠️ **未给 --since：会话创建时间这道闸是关的。** 实验前就存在、重启后 resume 的会话')
+    lines.push('  ⚠️ **未给 --since：准入这道闸是关的。** 实验前就存在、重启后 resume 的会话')
     lines.push('     可能把它的下一个 HIGH 当成"本会话第一个"。正式读数必须带 --since <T0>。')
   } else {
-    lines.push('  ' + pad('会话创建于 T0 之后：', 26) + '是主指标的准入条件')
-    if (e.excludedPreT0 > 0) lines.push('  ' + pad('被排除（T0 前创建）：', 26) + e.excludedPreT0 + ' 个首观测')
+    // 准入判的是**污染**（历史里有没有 T0 前的提示），不是**出生时间**。所以这里分两类报，
+    // 而不是笼统地说"T0 之后新建"——一个干净的旧会话是被允许进来的，读者有权知道有几个。
+    lines.push('  ' + pad('准入条件：', 26) + '历史里没有 T0 前投递的提示')
+    lines.push('  ' + pad('  · T0 之后新建：', 26) + e.primary.bornAfterT0 + ' 个观测')
+    if (e.primary.cleanOld > 0) {
+      lines.push('  ' + pad('  · T0 前创建但从未注入：', 26) + e.primary.cleanOld + ' 个观测（历史干净，予以准入）')
+    }
+    if (e.excludedCarryover > 0) lines.push('  ' + pad('被排除（有 T0 前残留）：', 26) + e.excludedCarryover + ' 个首观测')
     if (e.excludedBirthUnknown > 0) lines.push('  ' + pad('被排除（创建时间未知）：', 26) + e.excludedBirthUnknown + ' 个首观测')
   }
   lines.push('')
@@ -419,6 +456,15 @@ export function main(argv, io) {
     return 2
   }
   const pairs = pairTurns(readFileSync(path, 'utf8'))
+  // **必须在裁剪之前算。** 准入闸要判"这个会话在 T0 前有没有被注入过"，而下面几行会把 T0 之前的
+  // 记录全部删掉——删完就问不出来了。第一版把这个集合的用途交给裁剪后的数据，于是判据只能退化成
+  // 出生时间。顺序在这里是结论的一部分，不是风格。
+  const carryoverSessions = new Set()
+  for (const r of pairs.discovery) {
+    if (since !== undefined && r.injected === true && String(r.at ?? '') < since && r.sessionKey !== undefined && r.sessionKey !== null) {
+      carryoverSessions.add(String(r.sessionKey))
+    }
+  }
   if (since !== undefined) {
     for (const key of ['discovery', 'paired', 'unpaired']) {
       if (key === 'discovery') continue
@@ -426,7 +472,7 @@ export function main(argv, io) {
     }
     pairs.discovery = pairs.discovery.filter((t) => String(t.at ?? '') >= since)
   }
-  const summary = summarise(pairs, { since })
+  const summary = summarise(pairs, { since, carryoverSessions })
   if (argv.includes('--json')) {
     process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
     return 0
