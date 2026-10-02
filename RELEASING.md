@@ -56,6 +56,24 @@ node tools/publish-release.mjs --all      # 回填所有缺 Release 的版本
 
 需要 `gh` 已登录（或 `GH_TOKEN` 环境变量）。
 
+### 如果第 5 步抛 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`
+
+**症状**：`node tools/publish-release.mjs` 直接失败，`TypeError: fetch failed`，cause 是
+`unable to verify the first certificate`（`code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'`）。
+
+**原因**：本机存在 TLS 拦截（代理或安全软件替换了证书链），而 Node 默认**不读** Windows 证书存储，
+所以它不认那张拦截证书。
+
+**解法**：让 Node 使用系统证书存储。
+
+```sh
+node --use-system-ca tools/publish-release.mjs
+```
+
+**适用条件**：这个参数等于让 Node 信任系统证书存储里的拦截证书。只在**你确认本机拦截来源可信**时
+使用——在不受控的环境里加它是在降低安全性，不要无脑复制这条命令。若是别人的机器上出现同样症状，
+先问清拦截是谁装的。
+
 ## 为什么要脚本而不是记住步骤
 
 因为"推了 tag"和"建了 Release"在本地看起来完全一样——`git tag` 都有、`git push` 都成功。
