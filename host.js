@@ -1750,12 +1750,27 @@ export function apply(ctx, config) {
      * whether the turn will end up calling `skill_search`. So calls are accumulated from the
      * session event stream and flushed when the turn is over.
      *
-     * "Over" is observed at the **next** turn's first step, because this harness declares
-     * `turn/start` and `turn/end` but exposes no turn-stopping waterfall a plugin can hook —
-     * verified: `agent/turn-stopping` does not exist anywhere in 0.1.7-rc.2, so hooking it would
-     * have been instrumentation that silently never ran. A turn whose calls are never flushed is
-     * one abandoned mid-flight (abort, crash, session close); its numbers are lost rather than
-     * misattributed, which is the right failure direction for a measurement.
+     * "Over" is observed from that same stream: the harness appends `turn/end` at the end of every
+     * turn — in a `finally`, so a canceled or failed turn is closed too — and `session/disposed`
+     * covers a session torn down between turns. Both are events this plugin can already see:
+     * `turn/end` rides the very `session/event` channel whose `tool/call` events are counted below,
+     * and the format decoder requires a turn's call set to be closed before `turn/end` is appended,
+     * so the counts are complete at that instant.
+     *
+     * The previous version of this comment reached the opposite conclusion from a true premise: it
+     * looked for a turn-stopping *waterfall* (`agent/turn-stopping`), found none in 0.1.7-rc.2, and
+     * treated turn end as unobservable — although `dsh-agent-loop` appends
+     * `this.session.append('turn/end', { turn, reason })` and `dsh-session-projection-cache`
+     * consumes it as `ctx.on('session/event', (session, event) => { if (event.type === 'turn/end') … })`.
+     * The plugin was listening on that channel the whole time for `tool/call`.
+     *
+     * Settling at `turn/end` rather than at the **next** turn's first step is what makes a session's
+     * LAST turn countable — and a session's first eligible opportunity is usually its last turn,
+     * which is the single observation the experiment's primary metric is built from. Only the moment
+     * of writing changes: the same counters, for the same (sessionKey, turn), are written, which an
+     * offline recount from the session logs confirmed (55 of 55 overlapping (session, turn) units,
+     * all five counters equal). The next-turn flush is kept as a backstop; because `turn/end` clears
+     * the state it settles, the backstop can only fire for a turn whose `turn/end` never arrived.
      */
     const countedTools = new Set(['skill_search', 'skill_load', 'skill_ref', 'skill'])
 
@@ -1792,7 +1807,15 @@ export function apply(ctx, config) {
     }
 
     ctx.on('session/event', (session, event) => {
-      if (event === null || typeof event !== 'object' || event.type !== 'tool/call') return
+      if (event === null || typeof event !== 'object') return
+      if (event.type === 'turn/end') {
+        // The turn is over, and its call set is closed: settle it here instead of waiting for a next
+        // turn that may never come. Without this, every session's last turn is never written — and
+        // that is the turn the first-eligible observation usually falls in.
+        flush(sessionKeyOf(session))
+        return
+      }
+      if (event.type !== 'tool/call') return
       const state = perSession.get(sessionKeyOf(session))
       if (state === undefined) return
       const name = event.data === null || typeof event.data !== 'object' ? '' : String(event.data.name ?? '')
@@ -1801,12 +1824,18 @@ export function apply(ctx, config) {
       else state.other += 1
     })
 
+    ctx.on('session/disposed', (session) => {
+      // A session torn down between turns (closed window, crash) has no next step to settle it;
+      // whatever was counted for its open turn is written rather than dropped.
+      flush(sessionKeyOf(session))
+    })
+
     ctx.on('agent/pre-step', async ({ agent, messages, turn, step, signal }, next) => {
       const decision = await next()
       if (decision === null || typeof decision !== 'object' || decision.kind !== 'enter') return decision
       if (step !== 1) return decision
-      // A new turn starting means the previous one is over: flush it before measuring this one.
-      // Keyed by session, so a concurrent conversation cannot settle this one's counts.
+      // Backstop only: `turn/end` already settled the previous turn and cleared its state, so in a
+      // healthy session this finds nothing. It exists for a turn whose `turn/end` never arrived.
       const session = agent === undefined || agent === null ? undefined : agent.session
       const sessionKey = sessionKeyOf(session)
       const sessionCreatedAt = sessionCreatedAtOf(session)

@@ -8,10 +8,14 @@
 // 上一版那两条断言（"干跑不改变决策"、"injected: false"）现在会红，而且**应该红**：行为按设计
 // 变了。一个不会因为行为改变而变红的测试，等于没有在测行为。
 //
-// 这一版真正要证明的三件事：
+// 这一版真正要证明的四件事：
 //   1. 注入只发生在 `tier === HIGH` 且 `step === 1`，注入的消息形状合法（含唯一 id）；
 //   2. 遥测如实记录 `injected` 与**实测的 hint 字节数**（不是估算）；
-//   3. 每回合的工具调用被**在回合结束后**统计（`step 1` 时谁也不知道这一回合会不会去搜）。
+//   3. 每回合的工具调用被**在回合结束后**统计（`step 1` 时谁也不知道这一回合会不会去搜）；
+//   4. 结算点是会话事件流里的 `turn/end`（外加 `session/disposed` 兜底），所以**会话的最后一个
+//      回合也有记录**——首观测通常正落在那一回合。v1.15.5 之前只在下一回合的 `step 1` 结算，
+//      于是每个会话永远缺最后一回合，主指标的分母被系统性挖空（实测：19 个合格会话只剩 1 个
+//      可配对观测）。
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -122,6 +126,26 @@ function toolCall(name, session) {
   for (const handler of ctx._handlers.get('session/event') ?? []) {
     handler(session, { type: 'tool/call', seq: 1, time: Date.now(), data: { turn: 0, step: 0, callId: 'c', name, arguments: {} } })
   }
+}
+
+/**
+ * 投递一次 `turn/end`：**这是结算点**。
+ *
+ * 真机上它由 `dsh-agent-loop` 在 `finally` 里 append（所以取消、报错的回合也被闭合），并和
+ * `tool/call` 走同一条 `session/event` 通道；`dsh-session-projection-cache` 就是这么消费它的。
+ * 事件里的 `turn` 故意写成 0：插件应当按**自己记录的回合**结算，而不是被事件里的数字带着走。
+ */
+function turnEnd(session) {
+  if (session === undefined) throw new Error('turnEnd 需要一个 session')
+  for (const handler of ctx._handlers.get('session/event') ?? []) {
+    handler(session, { type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 0, reason: { kind: 'completed' } } })
+  }
+}
+
+/** 投递一次 `session/disposed`：会话在两个回合之间被销毁时的结算点。 */
+function dispose(session) {
+  if (session === undefined) throw new Error('dispose 需要一个 session')
+  for (const handler of ctx._handlers.get('session/disposed') ?? []) handler(session)
 }
 
 const highTask = 'Run a semgrep security audit on this repo'
@@ -235,10 +259,10 @@ ok('sessionCreatedAt 等于夹具的毫秒时间', turn11 !== undefined && turn1
   ok('创建时间拿不到时记 null（不伪造）', rec !== undefined && rec.sessionCreatedAt === null, JSON.stringify(rec && rec.sessionCreatedAt))
 }
 
-// ── 5) 每回合工具调用计数（在回合结束后写出）──────────────────────────────────
-// 时序必须与真实一致：**回合内先发生调用，下一个回合的 step 1 才 flush**。
-// 第一版把调用投在 flush 之后，于是它们被记到了下一回合——测试自己制造了一个"计数为 0"的假象。
-// 这里先回到第 12 回合的上下文（注入那一次），再投递这一回合的调用。
+// ── 5) 每回合工具调用计数：`turn/end` 到达时就结算 ─────────────────────────────
+// 时序与真机一致：**回合内先发生调用，回合结束时 `turn/end` 结算**。
+// 旧版在**下一个回合的 step 1** 结算，代价是每个会话的最后一个回合永远没有记录——而首观测通常
+// 就在那一回合。这里先回到第 12 回合的上下文（注入那一次），投递这一回合的调用，再投 `turn/end`。
 const turn12 = enter(highTask)
 await preStep({ agent, messages: turn12.messages, turn: 12, step: 1, signal: undefined }, turn12)
 toolCall('skill_search', agent.session)
@@ -247,11 +271,10 @@ toolCall('skill', agent.session)
 toolCall('read', agent.session)
 toolCall('bash', agent.session)
 toolCall('glob', agent.session)
-// 下一次 pre-step 触发 flush，把第 12 回合的计数写出来
-const nextTurn = enter(highTask)
-await preStep({ agent, messages: nextTurn.messages, turn: 14, step: 1, signal: undefined }, nextTurn)
+const beforeEnd = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).length
+turnEnd(agent.session)
 const calls12 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).pop()
-ok('回合结束后写出 turn-calls 记录', calls12 !== undefined, JSON.stringify(lines().filter((r) => r.kind === 'turn-calls')))
+ok('回合结束时写出 turn-calls 记录（不必等下一个回合）', calls12 !== undefined && lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).length === beforeEnd + 1, JSON.stringify(lines().filter((r) => r.kind === 'turn-calls')))
 ok('三个技能工具分别计数', calls12 !== undefined && calls12.skillSearchCalls === 1 && calls12.skillLoadCalls === 1 && calls12.skillRefCalls === 0, JSON.stringify(calls12))
 ok('原生 skill 工具单独计数（常驻目录 ≠ 库）', calls12 !== undefined && calls12.residentSkillCalls === 1, JSON.stringify(calls12 && calls12.residentSkillCalls))
 ok('其它工具汇总，不逐个记名', calls12 !== undefined && calls12.otherToolCalls === 3, JSON.stringify(calls12 && calls12.otherToolCalls))
@@ -259,14 +282,60 @@ ok('其它工具汇总，不逐个记名', calls12 !== undefined && calls12.othe
 ok('turn-calls 记录带 tier、arm 与 injected，便于对齐实验臂', calls12 !== undefined && calls12.tier === 'HIGH' && ['treatment', 'control'].includes(String(calls12.arm)) && calls12.injected === (calls12.arm === 'treatment'), JSON.stringify(calls12 && { t: calls12.tier, a: calls12.arm, i: calls12.injected }))
 ok('turn-calls 记录里没有工具参数、没有技能正文', calls12 !== undefined && JSON.stringify(calls12).includes('arguments') === false, JSON.stringify(calls12))
 
-// ── 6) 计数按回合归零（不会把上一回合的数带过来）───────────────────────────────
+// ── 6) 结算过的回合不会被兜底重复写出，且计数按回合归零 ────────────────────────
+const settled12 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).length
 const turn14 = enter(highTask)
 await preStep({ agent, messages: turn14.messages, turn: 14, step: 1, signal: undefined }, turn14)
+ok('已结算的回合不会被下一回合的兜底重复写出', lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).length === settled12, JSON.stringify(lines().filter((r) => r.kind === 'turn-calls' && r.turn === 12).map((r) => ({ s: r.skillSearchCalls, o: r.otherToolCalls }))))
 toolCall('skill_search', agent.session)
-const oneMore = enter(highTask)
-await preStep({ agent, messages: oneMore.messages, turn: 15, step: 1, signal: undefined }, oneMore)
+turnEnd(agent.session)
 const calls14 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 14).pop()
 ok('第 14 回合只记它自己的 1 次搜索', calls14 !== undefined && calls14.skillSearchCalls === 1 && calls14.skillLoadCalls === 0, JSON.stringify(calls14))
+
+// ── 6b) 兜底仍在：`turn/end` 万一没到，下一个回合的 step 1 仍然结算 ─────────────
+const turn15 = enter(highTask)
+await preStep({ agent, messages: turn15.messages, turn: 15, step: 1, signal: undefined }, turn15)
+toolCall('skill_load', agent.session)
+const turn16 = enter(highTask)
+await preStep({ agent, messages: turn16.messages, turn: 16, step: 1, signal: undefined }, turn16)
+const calls15 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 15).pop()
+ok('`turn/end` 缺失时由下一回合结算（兜底没被删掉）', calls15 !== undefined && calls15.skillLoadCalls === 1, JSON.stringify(calls15))
+
+// ── 6c) 会话的**最后一个**回合也有记录（这一条是回归测试）──────────────────────
+// 旧版只在下一回合结算，于是"走完一个回合就结束"的会话——子代理、被关掉的窗口、真机上最常见的
+// 一次问答——永远没有记录；而主指标的分母正是每个会话的**首个** eligible 回合。
+{
+  const last = agentFor('session-last-turn')
+  const task = enter(highTask)
+  await preStep({ agent: last, messages: task.messages, turn: 20, step: 1, signal: undefined }, task)
+  toolCall('skill_search', last.session)
+  turnEnd(last.session)
+  const rec = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 20).pop()
+  ok('会话最后一个回合也有 turn-calls 记录（旧版这条会红）', rec !== undefined && rec.skillSearchCalls === 1, JSON.stringify(rec))
+}
+
+// ── 6d) 会话被销毁时，未结算的回合也会写出（不丢）──────────────────────────────
+{
+  const going = agentFor('session-disposed')
+  const task = enter(highTask)
+  await preStep({ agent: going, messages: task.messages, turn: 30, step: 1, signal: undefined }, task)
+  toolCall('skill_load', going.session)
+  dispose(going.session)
+  const rec = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 30).pop()
+  ok('会话销毁时把在测回合结算掉', rec !== undefined && rec.skillLoadCalls === 1, JSON.stringify(rec))
+}
+
+// ── 6e) 没有在测回合时，结算事件不写出空记录 ────────────────────────────────────
+// 否则每个回合结束都会多出一行 0 计数，"没有记录"与"确实 0 次"的区分就被自己毁掉了。
+{
+  const idle = agentFor('session-never-measured')
+  const before = lines().filter((r) => r.kind === 'turn-calls').length
+  turnEnd(idle.session)
+  turnEnd(idle.session)
+  dispose(idle.session)
+  const after = lines().filter((r) => r.kind === 'turn-calls').length
+  ok('没有在测回合时结算不产生空记录', after === before, 'before=' + before + ' after=' + after)
+}
 
 // ── 7) 会话隔离：两个会话的同号回合既不混计数，也不被当成同一条记录 ─────────────
 //
@@ -276,21 +345,20 @@ ok('第 14 回合只记它自己的 1 次搜索', calls14 !== undefined && calls
 {
   const A = agentFor('session-A')
   const B = agentFor('session-B')
-  // 两个会话都走到 turn 40（同号），各投递不同的调用
+  // 两个会话都走到 turn 40（同号），各投递不同的调用；B 的调用故意插在 A 的两次调用之间，
+  // 用来验证并发会话之间不会互相污染计数。
   const taskA = enter(highTask)
   await preStep({ agent: A, messages: taskA.messages, turn: 40, step: 1, signal: undefined }, taskA)
   const taskB = enter(highTask)
   await preStep({ agent: B, messages: taskB.messages, turn: 40, step: 1, signal: undefined }, taskB)
 
   toolCall('skill_search', A.session)
-  toolCall('skill_search', A.session)
   toolCall('skill_load', B.session)
+  toolCall('skill_search', A.session)
 
-  // 各自进入下一回合，触发各自的 flush
-  const nextA = enter(highTask)
-  await preStep({ agent: A, messages: nextA.messages, turn: 41, step: 1, signal: undefined }, nextA)
-  const nextB = enter(highTask)
-  await preStep({ agent: B, messages: nextB.messages, turn: 41, step: 1, signal: undefined }, nextB)
+  // 各自在自己的回合结束时结算
+  turnEnd(A.session)
+  turnEnd(B.session)
   const turn40 = lines().filter((r) => r.kind === 'turn-calls' && r.turn === 40 && r.tier !== undefined)
   const a40 = turn40.find((r) => r.sessionKey !== null && r.skillSearchCalls === 2)
   const b40 = turn40.find((r) => r.sessionKey !== null && r.skillLoadCalls === 1)
