@@ -108,15 +108,40 @@ for (const file of ['README.md', 'README.en.md']) {
 const notes = readdirSync(root + 'docs').filter((n) => /^release-notes-v.+\.md$/.test(n))
 const badHeading = []
 const notBilingual = []
+/** 一份说明里 H1 的数量与内容。围栏代码块内的 `# ` 不算标题。 */
+function h1sOf(text) {
+  const out = []
+  let inFence = false
+  text.split('\n').forEach((line, index) => {
+    if (/^```/.test(line)) inFence = !inFence
+    if (inFence === false && /^# /.test(line)) out.push({ line: index + 1, text: line.slice(2).trim() })
+  })
+  return out
+}
+const wrongH1Count = []
 for (const name of notes) {
   const version = name.replace(/^release-notes-v/, '').replace(/\.md$/, '')
   const text = read('docs/' + name)
   const first = text.split('\n')[0]
   if (first.startsWith('# v' + version + ' ') === false) badHeading.push(name + ' → ' + first.slice(0, 50))
   if (/[\u4e00-\u9fff]/.test(first) === false || text.includes('## English') === false) notBilingual.push(name)
+  // ★ H1 有且只有一个。理由不是审美：
+  //
+  //   `tools/publish-release.mjs` 用**第一行**作 GitHub Release 的标题，所以多出来的 H1
+  //   不会影响发布结果 —— 正因如此，这个偏离**不会被任何东西发现**。它靠约定维持了 45 份文件，
+  //   而约定靠人记。几个月后写发布说明的人不会知道"只能有 1 个 H1"，除非有一条断言告诉他。
+  //
+  //   v1.16.0 的初稿就踩了这个坑：为让英文侧也有"大标题"，把 `## English` 下的标题写成了 H1，
+  //   于是同一份文件出现两个 `# v1.16.0 …`（中文一个、英文一个）。发布系统毫无反应，
+  //   是人工核对时才发现的。这条断言把那次的发现固化下来。
+  const h1s = h1sOf(text)
+  if (h1s.length !== 1) {
+    wrongH1Count.push(name + ' → H1=' + String(h1s.length) + (h1s.length === 0 ? '' : ' 首个: ' + h1s[0].text.slice(0, 40)))
+  }
 }
 ok('每份发布说明的标题都以自己的版本号开头（Release 标题取自此）', badHeading.length === 0, badHeading.join('; '))
 ok('每份发布说明都双语（中文标题 + ## English）', notBilingual.length === 0, notBilingual.join(', '))
+ok('每份发布说明恰好一个 H1（英文节用 ## English，不另起大标题）', wrongH1Count.length === 0, wrongH1Count.join('; '))
 
 // --- 发版流程文档与脚本都必须存在 ------------------------------------------------
 ok('RELEASING.md 存在（记录 tag 与 Release 是两步、以及版本策略）', existsSync(root + 'RELEASING.md'))
