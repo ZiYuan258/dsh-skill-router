@@ -53,7 +53,11 @@ check('loading a stale row does not throw', staleLoad.skills?.length === 1)
 // be visible in the rendered text: the JSON carries it, but the model reads the text.
 const dupes = await search.execute({ query: 'alpha widgets' }, exec)
 const dupeText = render(dupes)
-check('several copies are reported in the JSON', dupes.hits.every((hit) => hit.copies >= 2), String(dupes.hits[0]?.copies))
+check(
+  'several copies are reported in the JSON',
+  dupes.hits.every((hit) => hit.copies?.total >= 2),
+  JSON.stringify(dupes.hits[0]?.copies),
+)
 check('the rendered text names the repos to choose between', /pass repo to skill_load/.test(dupeText), dupeText.split('\n').slice(-1)[0])
 check('the rendered text lists more than one repo', new Set(dupes.hits.map((hit) => hit.repo)).size > 1)
 

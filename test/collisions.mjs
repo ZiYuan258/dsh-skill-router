@@ -27,7 +27,15 @@ if (libraryRoot === undefined) {
   // The fixture ships alpha-widgets twice: skills/ and plugins/deep/skills/.
   const plain = await load.execute({ name: 'alpha-widgets' }, exec)
   check('without a hint the shallowest copy wins', dirOf(plain).replace(/\\/g, '/').endsWith('alpha-skills/skills/alpha-widgets'), dirOf(plain))
-  check('the copy count is reported', plain.skills?.[0]?.copies >= 2, 'copies=' + plain.skills?.[0]?.copies)
+  // `copies` 是按来源分开的对象（库内多份 vs 跨域同名）。两处分支各自断言它，
+  // 且都检查 `.library` 而不是只检查 `.total` —— 只查 total 的话，
+  // 一个"把 catalog 计数算进 library"的实现也能通过。
+  check('the copy count is reported', plain.skills?.[0]?.copies?.total >= 2, 'copies=' + JSON.stringify(plain.skills?.[0]?.copies))
+  check(
+    'the copy count separates library copies from catalog ones',
+    plain.skills?.[0]?.copies?.library >= 2 && plain.skills?.[0]?.copies?.catalog === 0,
+    'copies=' + JSON.stringify(plain.skills?.[0]?.copies),
+  )
   check('the chosen repo is reported', plain.skills?.[0]?.repo === 'alpha-skills')
 
   const hinted = await load.execute({ name: 'alpha-widgets', repo: 'alpha' }, exec)
@@ -43,7 +51,12 @@ if (libraryRoot === undefined) {
   const name = 'test-driven-development'
   const plain = await load.execute({ name }, exec)
   check('without a hint a copy is chosen deterministically', String(plain.loaded).includes(name))
-  check('the copy count is reported', plain.skills?.[0]?.copies >= 2, 'copies=' + plain.skills?.[0]?.copies)
+  check('the copy count is reported', plain.skills?.[0]?.copies?.total >= 2, 'copies=' + JSON.stringify(plain.skills?.[0]?.copies))
+  check(
+    'the copy count attributes copies to the library, not the catalog',
+    plain.skills?.[0]?.copies?.library >= 2 && typeof plain.skills?.[0]?.copies?.catalog === 'number',
+    'copies=' + JSON.stringify(plain.skills?.[0]?.copies),
+  )
 
   const second = await load.execute({ name }, exec)
   check('the same name resolves to the same copy twice', dirOf(plain) === dirOf(second), dirOf(plain) + ' vs ' + dirOf(second))

@@ -334,6 +334,10 @@ function parseIndex(text) {
       // When a writer does emit it, it is trigger phrasing by definition and is scored as
       // such.
       whenToUse: cleanDescription(fields[6]),
+      // 来源标记：库行由索引提供。catalog 行（本会话目录）由 `catalogRow()` 造，标 'catalog'。
+      // 搜索域合并了两个来源之后，下游必须能分辨它们：`repo`/`relpath` 只对库行有意义，
+      // `resolveRow` 也必须按来源走不同的定位路径。
+      origin: 'library',
     })
   }
   return rows
@@ -397,6 +401,10 @@ function scoreRow(row, context) {
   let score = 0
   let nameHits = 0
   let matchCount = 0
+  // 名字命中的**形态**（0–4，越大越强）。`nameHits` 只回答"命中了几个 token"，
+  // 回答不了"命中得多准"—— 而这两件事对"这一条是不是模型要找的"给出不同答案。
+  // 详见 `nameMatchForm`。
+  let nameForm = -1
   const why = explaining ? [] : undefined
   for (const token of tokens) {
     let part = 0
@@ -404,6 +412,7 @@ function scoreRow(row, context) {
     if (nameText.includes(token)) {
       part += WEIGHT.name
       nameHits += 1
+      nameForm = Math.max(nameForm, nameMatchForm(nameText, token))
       fields.push('name')
     }
     if (descText.includes(token)) {
@@ -430,7 +439,77 @@ function scoreRow(row, context) {
   const exact = String(ctx.exactText ?? '').trim().toLowerCase() !== '' && nameText === String(ctx.exactText).trim().toLowerCase()
   if (exact) score += WEIGHT.exactName
   if (why !== undefined && exact) why.push('exact name: +' + String(WEIGHT.exactName))
-  return { row, score, matchCount, nameHits, why, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
+  return { row, score, matchCount, nameHits, nameForm, why, listed: tokens.length > 0 && nameHits === tokens.length ? 1 : 0 }
+}
+
+/**
+ * 名字匹配的**形态**，四级，越大越强。回答"这一条命中得多准"，而不是"命中了几个词"。
+ *
+ *   3 NAME_EXACT   扁平化后完全相等          univer    → univer
+ *   2 NAME_SEGMENT token 落在**词段边界**上   debugging → systematic-debugging
+ *                                            univer    → univer-sheet
+ *   1 NAME_PREFIX  名字以 token 开头，但切在词中间  univer → universal-checkout
+ *   0 NAME_CONTAINS 仅子串                    test      → latest
+ *  -1              名字里没有这个 token
+ *
+ * ── 为什么"词段"是一级，而"首段"不是单独一级 ────────────────────────────────
+ *
+ * 用户提的三级是「完全匹配 > 前缀匹配 > 子串匹配」。实现前先实测，发现两件事：
+ *
+ * **一、"前缀"混了两种完全不同的东西。** 而它们的置信度差得远：
+ *
+ *     univer → univer-sheet          `univer` 是完整词段
+ *     univer → universal-checkout    `univer` 只是 `universal` 的开头，切在词中间
+ *
+ * 前者是"同一个概念"，后者只是拼写巧合 —— 这正是 `univer` 查询返回 44 条里 41 条是垃圾的原因。
+ * 所以**词段边界必须高于裸前缀**，这一条同时满足用户的意图（前缀档仍在子串之上）和实测需要。
+ *
+ * **二、把"首段"再单独提一级会撞上既有回归判据。** 实测：
+ *
+ *     debugging-and-error-recovery   首段是 debugging  ⇒ 若"首段"独立成级，它第 1
+ *     systematic-debugging           debugging 是尾段
+ *
+ * 而 `debugging` 是 t96 那次诊断的收窄查询，正确目标是 `systematic-debugging`（用户指定为
+ * **回归底线**）。两条都是"系统性根因调试"（后者 description 逐字含 "Guides systematic
+ * root-cause debugging"），所以更细的区分不是正确性，只是偏好 —— 而偏好不该压过底线。
+ *
+ * ⇒ **首段与中间段同为 NAME_SEGMENT**：词段边界统一高于裸前缀，首尾不再区分。
+ *   同一形态内退回既有的 score → 名字长度 tiebreak（`systematic-debugging` 因此仍在前面）。
+ */
+const NAME_EXACT = 3
+const NAME_SEGMENT = 2
+const NAME_PREFIX = 1
+const NAME_CONTAINS = 0
+/** 扁平化：去掉分隔符，用于"完全相等"判定（`next-dev-loop` == `nextdevloop`）。 */
+function flattenName(text) {
+  return String(text).toLowerCase().replace(/[-_.\s]+/g, '')
+}
+/** 词段：技能名按分隔符切开（`systematic-debugging` → ['systematic','debugging']）。 */
+function nameSegments(text) {
+  return String(text)
+    .toLowerCase()
+    .split(/[-_.\s]+/)
+    .filter((part) => part !== '')
+}
+/**
+ * 匹配形态判定。调用方保证 `nameText` 已小写、且已知它包含 token。
+ *
+ * `token` 自身可能带连字符（`next-dev-loop`），所以比较用**扁平化**判定完全相等，
+ * 用词段判定边界 —— 两条路都不依赖 token 的写法。
+ */
+function nameMatchForm(nameText, token) {
+  if (nameText.includes(token) === false) return -1
+  if (flattenName(nameText) === flattenName(token)) return NAME_EXACT
+  const segments = nameSegments(nameText)
+  if (segments.includes(token)) return NAME_SEGMENT
+  // token 含分隔符时（用户直接打了 `next-dev-loop`），词段相等判定够不着；
+  // 这时"名字以它开头"就该按词段算，而不是按裸前缀算。
+  if (nameText.startsWith(token)) {
+    const rest = nameText.slice(token.length)
+    if (rest === '' || /^[-_.\s]/.test(rest)) return NAME_SEGMENT
+    return NAME_PREFIX
+  }
+  return NAME_CONTAINS
 }
 
 /** Shorten one display line (search hit descriptions). Silent by design: this is presentation. */
@@ -669,10 +748,106 @@ export function buildSkillRouterTools(ctx, register) {
   let rootDir = ''
   // name (lowercased) -> copies in the current library. Filled by loadIndex.
   let nameCounts = new Map()
+  // name (lowercased) -> copies in this session's catalog. Filled by skill_search when it
+  // merges the catalog into the search domain; stays empty when no catalog is reachable.
+  let catalogNameCounts = new Map()
 
   /** How many library rows share this skill name; >1 means skill_load needs a repo hint. */
   function copiesOf(name) {
     return nameCounts.get(String(name).toLowerCase()) ?? 1
+  }
+
+  /**
+   * 一份技能的副本构成，按来源分开报。
+   *
+   * 为什么不是一个数字：`copies` 在库内的语义是"同一技能出现在多个上游仓库里"，
+   * 而在搜索域合并之后它多了第二种成因——**同一个名字同时存在于库和本会话目录**
+   * （实测 `next-dev-loop` 就是这样：库一份、`project-dsh` 一份）。这两件事对模型的动作
+   * 含义完全不同：
+   *
+   *   库内 2 份   → `skill_load` 要带 `repo` 才能选对那一份
+   *   跨域 1+1 份 → 带 `repo` 选不了目录那一份（catalog 技能根本不属于任何 repo），
+   *                 报 `copies: 2` 会让模型去找一个不存在的 repo 参数
+   *
+   * ⇒ 分开报，模型才可能做对动作。
+   *
+   * 形状是对象（`{ total, library, catalog }`）。工具返回值走 JSON，嵌套没有问题；
+   * 用户提出过退化形式 `copies: 2, copySources: [...]`，在有 JSON 可用时不必退化。
+   * `total` 放在第一位，是为了让"只想判断是否重名"的读法（含插件自己的 note 逻辑）
+   * 仍然只看一个数就够。
+   */
+  function copiesFor(name) {
+    const library = copiesOf(name)
+    // catalog 侧的数量：本会话目录里同名了几次。正常是 0 或 1；注册表允许同名多层，
+    // 所以不假设它一定是 1。
+    const catalog = catalogNameCounts.get(String(name).toLowerCase()) ?? 0
+    return { total: library + catalog, library, catalog }
+  }
+
+  /**
+   * 本会话的技能目录（registry union），作为**搜索域的第二个来源**。
+   *
+   * 为什么需要它：`SEARCH_DESCRIPTION` 一直写着 "Search every skill available to this agent:
+   * the session skill catalog plus the staged library"，而实现只读了库索引 —— 声明与实现不一致。
+   * 后果是实测过的：同一个会话里"搜 hindsight 得到 0 条"，而 `hindsight-coding-agent`
+   * 当时就在这个会话的目录里（它由用户级 `user-agents` 根提供，不在 `.skill-src` 索引里）。
+   *
+   * 走 `skills.list()` 而不是自己扫磁盘，是因为目录是**三层合并**的结果（`dsh-skill` 的
+   * 收集语义）：运行时注册的 skill（由别的插件在 apply 时注册，例如 `dsh-univer-office`
+   * 提供的 `univer*`）、各 provider 的 `list()`（project-dsh / project-agents / user-dsh /
+   * user-agents / custom / bundled）、以及随 DSH 发布的 bundled。扫磁盘只能拿到中间那一层。
+   *
+   * 注意本插件**只读不写**目录：这里没有任何注册、安装或写入调用，`test/starter-library.mjs`
+   * 把这一点断言成不变量（入门技能绝不进常驻目录）。
+   *
+   * 与 `loadSkill` 的回退路径共用同一个服务、同一套容错：`ctx.get` 可能不存在（minimal host），
+   * `list` 可能不是函数，收集可能失败。**任何一种情况都退化为今天的"只有库"，绝不让搜索失败**
+   * —— 目录是增益，不是依赖。
+   *
+   * @returns summary 数组，或空数组。永不抛出。
+   */
+  async function loadCatalog(cwd, scope, signal) {
+    const skills = typeof ctx.get === 'function' ? ctx.get('skills') : undefined
+    if (skills === undefined || skills === null || typeof skills.list !== 'function') return []
+    try {
+      const summaries = await skills.list({ cwd, signal, scope })
+      return Array.isArray(summaries) ? summaries : []
+    } catch {
+      /* 目录拿不到不是错误：搜索继续，只是域里没有它们 */
+      return []
+    }
+  }
+
+  /**
+   * 把一条 catalog summary 变成与库行**同构**的搜索行。
+   *
+   * `toSummary()` 给的是 `{ name, path?, description, whenToUse?, invocation, source, provider,
+   * resourceBase? }` —— **没有 `repo`，没有 `relpath`**。这两个字段在搜索里各有用途
+   * （`scoreRow` 用它们做 path 打分、返回里要报 `libraryRelative`、`resolveRow` 用它们拼路径），
+   * 所以缺了它们必须靠 `origin` 分辨，而不是留空让下游误判。
+   *
+   * 留空的后果是具体的：`resolveRow` 会拼出 `rootDir//SKILL.md` 去 stat，失败后
+   * `catch { missing = true }` 会把**每一条** catalog 行渲染成 `STALE: SKILL.md is missing`
+   * —— 对一条完全健康的技能报"索引过期"。
+   */
+  function catalogRow(summary) {
+    if (summary === null || typeof summary !== 'object') return null
+    const name = String(summary.name ?? '').trim()
+    if (name === '') return null
+    return {
+      name,
+      // 空 repo / relpath 是**如实**表达"这两个概念对 catalog 技能不存在"，
+      // 而不是"它们的值是空字符串"。下游一律先看 `origin`。
+      repo: '',
+      relpath: '',
+      description: String(summary.description ?? ''),
+      files: '',
+      whenToUse: summary.whenToUse === undefined || summary.whenToUse === null ? '' : String(summary.whenToUse),
+      origin: 'catalog',
+      // 目录内部定位用，不显示给模型（绝对路径与库里的相对路径不是一回事）。
+      catalogPath: summary.path === undefined ? '' : String(summary.path),
+      catalogSource: String(summary.source ?? ''),
+    }
   }
 
   /**
@@ -688,6 +863,28 @@ export function buildSkillRouterTools(ctx, register) {
    * fine", so the stale entries can be reported rather than silently offered.
    */
   async function resolveRow(row) {
+    // catalog 行（本会话目录里的技能）**没有** repo/relpath —— 拼 `rootDir/repo/relpath`
+    // 会得到 `rootDir//SKILL.md`，stat 失败，然后 catch 把一条完全健康的技能标成 STALE。
+    // 目录 summary 自带绝对路径（`path`），有就直接用它。
+    if (row.origin === 'catalog') {
+      const catalogPath = String(row.catalogPath ?? '')
+      if (catalogPath === '') {
+        // summary 的 `path` 是可选字段（`toSummary` 用条件展开，只有提供方给了才有）。
+        // 缺它就是"不知道路径"，**不是**"文件不见了"：报 stale 是撒谎，报 missing 也一样。
+        // 返回 missing: false，让下游把 path 留空而不是说它坏了。
+        return { directory: '', path: '', missing: false }
+      }
+      try {
+        const target = await ctx.fs.resolve(catalogPath)
+        const display = String(target.displayPath ?? catalogPath)
+        const info = await ctx.fs.stat(target)
+        if (info === undefined) return { directory: '', path: display, missing: true }
+        return { directory: stripTrailingSlashes(display.slice(0, Math.max(0, display.length - 'SKILL.md'.length))), path: display, missing: false }
+      } catch {
+        // 目录说它在、文件系统说不在了：这才是真正的 stale，如实报。
+        return { directory: '', path: catalogPath, missing: true }
+      }
+    }
     const joined = joinPath(joinPath(joinPath(rootDir, row.repo), row.relpath), 'SKILL.md')
     let path = joined
     let directory = stripTrailingSlashes(joined.slice(0, Math.max(0, joined.length - 'SKILL.md'.length)))
@@ -998,11 +1195,22 @@ export function buildSkillRouterTools(ctx, register) {
         // words that carry no signal.
         const loose = Number(result.strict) === 0 && result.fallback === 'or'
         const weak = result.fallback === 'weak'
+        // 名字命中数与总命中数的差，是"只被描述/路径命中"的条数。三档信息一起给，
+        // 模型才知道"这一屏为什么只有这些"以及"还有多少在别处"。
+        //
+        // 只在两者**不相等**时才提：相等说明全部命中都在名字里，报"0 by description"
+        // 是纯噪声（而且会让每次搜索都变长，那是这个插件最不该付的成本）。
+        const nameMatched = Number(result.nameMatched ?? result.total)
+        const descOnly = Number(result.total) - nameMatched
+        const split =
+          Number.isFinite(descOnly) && descOnly > 0 && nameMatched > 0
+            ? ' (' + String(nameMatched) + ' with a keyword in the name; ' + String(descOnly) + ' description/path only)'
+            : ''
         const headline = loose
-          ? '0 exact match(es); ' + String(result.total) + ' partial match(es) in ' + String(result.library)
+          ? '0 exact match(es); ' + String(result.total) + ' partial match(es) in ' + String(result.library) + split
           : weak
             ? 'no match in ' + String(result.library)
-            : String(result.total) + ' match(es) in ' + String(result.library)
+            : String(result.total) + ' match(es) in ' + String(result.library) + split
         const lines = [
           headline +
             '; showing ' +
@@ -1011,9 +1219,9 @@ export function buildSkillRouterTools(ctx, register) {
             (loose ? ' — no entry contained every keyword, so these match all but one' : ''),
         ]
         for (const hit of hits) {
-          lines.push(
-            '- ' + String(hit.name) + '  [' + String(hit.repo) + ']' + (String(hit.description) === '' ? '' : '\n    ' + String(hit.description)),
-          )
+          // catalog 行没有 repo：渲染成 `[]` 会读成一个空的仓库名，而不是"不属于任何仓库"。
+          const where = String(hit.repo) !== '' ? '  [' + String(hit.repo) + ']' : hit.origin === 'catalog' ? '  [catalog' + (String(hit.source ?? '') === '' ? '' : ':' + String(hit.source)) + ']' : ''
+          lines.push('- ' + String(hit.name) + where + (String(hit.description) === '' ? '' : '\n    ' + String(hit.description)))
           // Surface the trigger phrasing only when it says something the description does
           // not, so a library that fills both does not pay for the duplication twice.
           if (String(hit.whenToUse) !== '' && String(hit.whenToUse) !== String(hit.description)) {
@@ -1029,8 +1237,13 @@ export function buildSkillRouterTools(ctx, register) {
         if (String(result.error) !== '') lines.push('error: ' + String(result.error))
         // The note tells the model to pass `repo` when copies > 1, so the count has to be
         // visible: the JSON carries it, but the model reads this text, not the JSON.
-        const duplicated = hits.filter((hit) => Number(hit.copies) > 1)
-        const duplicatedRepos = new Set(duplicated.map((hit) => String(hit.repo)))
+        //
+        // `copies` 现在是对象（`{ total, library, catalog }`），所以这里必须读 `.total`。
+        // 旧写法 `Number(hit.copies) > 1` 对对象得 `NaN`，比较恒假 —— 提示会**静默消失**，
+        // 不抛错、不报错，只是那句"pass repo to choose"再也不出现。
+        const copiesTotal = (hit) => (isRecord(hit.copies) ? Number(hit.copies.total) : Number(hit.copies))
+        const duplicated = hits.filter((hit) => copiesTotal(hit) > 1)
+        const duplicatedRepos = new Set(duplicated.map((hit) => String(hit.repo)).filter((repo) => repo !== ''))
         if (duplicated.length > 1 && duplicatedRepos.size > 1) {
           lines.push(
             'note: ' + String(duplicated.length) + ' of these are copies of a name that exists in several repos (' + [...duplicatedRepos].join(', ') + '); pass repo to skill_load to choose.',
@@ -1050,7 +1263,41 @@ export function buildSkillRouterTools(ctx, register) {
       const query = typeof input.query === 'string' ? input.query : ''
       const cwd = exec.agent === undefined ? '' : String(exec.agent.session.header.cwd)
       const loaded = await loadIndex(cwd, exec.signal)
-      if (loaded.rows.length === 0) {
+      // ③ 搜索域 = 库索引 + 本会话目录。
+      //
+      // 声明（SEARCH_DESCRIPTION）一直说含 catalog，实现一直只有库 —— 这是声明与实现不一致，
+      // 不是"扩展功能"。最干净的证据是 t108：同一会话搜 "hindsight" 得 0 条，而正确目标
+      // `hindsight-coding-agent` 当时就在目录里。
+      //
+      // 合并规则只有一条：**库行优先**。同名时库行已经在 `loaded.rows` 里，catalog 的同名项
+      // 不再追加（否则一次搜索会因为同一个名字出现两遍而浪费名额）。它们不是重复，是同一名字的
+      // 两个来源 —— `copies` 会如实报出总数（见下方 `copiesFor`）。
+      //
+      // `scope: exec.agent` 与 `skill_load` 的回退路径一致：目录是**会话级**的，
+      // 同一个 cwd 在不同 scope 下可以不同。这让搜索结果随会话变化，而这是正确的 ——
+      // 声明说的是 "every skill available to this agent"。
+      const catalogSummaries = await loadCatalog(cwd, exec.agent, exec.signal)
+      const catalogRows = []
+      const catalogCounts = new Map()
+      if (catalogSummaries.length > 0) {
+        for (const summary of catalogSummaries) {
+          const row = catalogRow(summary)
+          if (row === null) continue
+          const key = row.name.toLowerCase()
+          // 计数要在去重**之前**做：同名出现两次是真实的两份，不是一条。
+          catalogCounts.set(key, (catalogCounts.get(key) ?? 0) + 1)
+          if (catalogRows.some((seen) => seen.name.toLowerCase() === key)) continue
+          catalogRows.push(row)
+        }
+      }
+      // 库行优先：同名时库行已经在 `loaded.rows` 里，catalog 的同名项不再追加为**搜索行**
+      // （否则一次搜索会因为同一个名字出现两遍而浪费名额）。但它仍然算一份副本——
+      // 计数在 `catalogCounts` 里，`copiesFor` 用它报出跨域构成。
+      const libraryNames = new Set(loaded.rows.map((row) => row.name.toLowerCase()))
+      const extraRows = catalogRows.filter((row) => libraryNames.has(row.name.toLowerCase()) === false)
+      catalogNameCounts = catalogCounts
+      const searchRows = extraRows.length === 0 ? loaded.rows : [...loaded.rows, ...extraRows]
+      if (searchRows.length === 0) {
         return jsonSafe({ library: loaded.root, starterLibrary: loaded.bundled === true ? true : undefined, total: 0, shown: 0, hits: [], error: loaded.error === '' ? 'the skill index is empty' : loaded.error })
       }
       const tokens = tokenize(query)
@@ -1080,8 +1327,13 @@ export function buildSkillRouterTools(ctx, register) {
       // discovery layer must not inherit (see `discoverRows`).
       const collect = (requireAll) => {
         const found = []
-        for (const row of loaded.rows) {
-          if (repoFilter !== '' && !row.repo.toLowerCase().includes(repoFilter)) continue
+        for (const row of searchRows) {
+          // repo 过滤只对库行有意义：catalog 技能不属于任何上游仓库，拿它去比 repo
+          // 只会把目录整个滤掉。带 repo 过滤的查询按定义是在找库里的东西。
+          if (repoFilter !== '') {
+            if (row.origin === 'catalog') continue
+            if (!row.repo.toLowerCase().includes(repoFilter)) continue
+          }
           const scored = scoreRow(row, { tokens, requireAll, explaining, exactText: query })
           if (scored !== undefined) found.push(scored)
         }
@@ -1109,30 +1361,103 @@ export function buildSkillRouterTools(ctx, register) {
         }
       }
 
+      // ④（名字命中优先 + 形态排序）的适用范围：**单词查询**。
+      // 多词查询里 `matchCount` 是相关度的正确信号，插入形态键会破坏它（实测三处回归）。
+      // 单词查询里 `matchCount` 恒为 1、不带信息，形态才是唯一有区分力的维度。
+      const singleToken = tokens.length === 1
       scored.sort((a, b) => {
         if (b.listed !== a.listed) return b.listed - a.listed
         if (b.matchCount !== a.matchCount) return b.matchCount - a.matchCount
+        // 名字命中的**形态**先于分数，但**只对单词查询**。理由见下方分档处的长注释：
+        // 多词查询靠 `matchCount` 区分相关度，插入形态键会把"命中两个词但都不在名字里"的行
+        // 挤到"命中一个词但在名字里"的行后面 —— 实测把 `debug failing test` 的
+        // `api-analyzer` 和 `kubernetes helm` 的两条挤掉了。
+        if (singleToken && b.nameForm !== a.nameForm) return b.nameForm - a.nameForm
         if (b.score !== a.score) return b.score - a.score
         if (b.nameHits !== a.nameHits) return b.nameHits - a.nameHits
         if (a.row.name.length !== b.row.name.length) return a.row.name.length - b.row.name.length
         return a.row.name < b.row.name ? -1 : 1
       })
+      // ── ④ 分档：名字命中的排在前面，描述命中的退到第二档 ──────────────────────────
+      //
+      // 为什么需要它：`includes` 是子串匹配，一个**单词**查询会拖回大量"只有描述里出现过这个词"
+      // 的行。实测 `univer` 命中 44 条，其中 name 含它的只有 3 条 —— 而那 3 条里还有 3 个
+      // `universal-*`（拼写巧合）。模型拿到 12 个名字，前几个全是无关的，它无从判断。
+      //
+      // ── 为什么只对单词查询（`tokens.length === 1`）生效 ─────────────────────────
+      //
+      // 这是实测定的边界，不是保守。第一版对**所有**查询都分档，回归判据 J 立刻抓到三处破坏：
+      //
+      //     "debug failing test"    丢失 api-analyzer（它命中 2/3 词，但都不在名字里）
+      //     "kubernetes helm"       丢失 mirrord-kafka / mirrord-temporal（同上）
+      //     "semgrep security scan" 顺序被打乱
+      //
+      // 多词查询里 `matchCount`（命中几个词）才是相关度的正确信号：命中 2 个词但都不在名字里，
+      // 比命中 1 个词但在名字里更相关。而单词查询里 `matchCount` **恒等于 1**（所有命中都命中了
+      // 那唯一的词），它不携带任何信息 —— 所以那里才需要形态来区分。
+      //
+      // 分档**不是过滤**：`total` 仍报全量，`nameMatched` 报第一档的条数，模型据此知道
+      // "还有 N 条是描述命中的"，可以自己决定要不要换更具体的词。
+      // 这样既不丢信息（今天的 44 条仍然可达），又让第一屏有意义。
+      //
+      // 第二档只在第一档**为空**时放开。用户提出的例外（"第一档有噪音时也放开第二档"）
+      // 经实测**在本语料里不需要**：24 个真实查询 + 6 个补充查询里，凡第二档有名字相关的行，
+      // 第一档也有（风险场景 0 个）。但那条例外并非无用 —— 它防的是未预料到的语料，
+      // 所以这里退化成一条更保守的规则：**第一档非空且第二档也有内容时，仍然如实报出
+      // 第二档的条数**（`nameMatched` / `total` 的差），由模型决定。
+      const nameMatched = scored.filter((entry) => entry.nameHits > 0).length
+      const nameTier = singleToken ? scored.filter((entry) => entry.nameHits > 0) : scored
+      const restTier = singleToken ? scored.filter((entry) => entry.nameHits === 0) : []
+      // ── 例外条款（用户提出，实测确认需要）──────────────────────────────────────────
+      //
+      // 条件：第一档**全部**是"裸片段"命中（形态 ≤ NAME_PREFIX）而第二档非空。
+      // 含义：名字里根本没这个词，命中全是拼写巧合 —— 此时"名字命中优先"这个前提本身失效，
+      // 正确的东西可能整批在第二档，被一个不可信的第一档挡住。
+      //
+      // 实测（55 个查询的扫描，`verify-tier1-all-noise.mjs`）：**恰好一条命中这个条件**，
+      // 而且是退化路径 —— 当 catalog 不可达时（minimal host / 目录收集失败）搜 `univer`：
+      //    第一档 3 条全是 prefix：universal-exam-cram-coach-full / -coach / universal-checkout
+      //    第二档 41 条
+      // 第一档里一条真 `univer*` 都没有（那些由 `dsh-univer-office` 注册，目录拿不到时不在域里）。
+      //
+      // 有 catalog 时这条不会触发：那时第一档含 exact 的 `univer` 与 segment 的 `univer-*`，
+      // 最高形态 3 > PREFIX，名字信号是可信的。
+      //
+      // 放开的方式是**追加**而不是替换：第一档仍在前面（它们至少名字里含这个词），
+      // 第二档接在后面。信息顺序仍然表达"先看这些"，只是不再把它们藏起来。
+      const maxForm = nameTier.length === 0 ? -1 : Math.max(...nameTier.map((entry) => entry.nameForm))
+      const weakNameTier = maxForm <= NAME_PREFIX && restTier.length > 0
+      const shownPool = nameTier.length === 0 ? restTier : weakNameTier ? [...nameTier, ...restTier] : nameTier
+      // 重名提示必须按 `copies.total` 判断，且要区分两种成因——旧代码只看 `copies > 1`，
+      // 那在 `copies` 变成对象之后会把对象和数字比较（永远 false），提示会静默失效。
+      // 这不是假设：`TypeError` 不会发生，比较只是恒假，所以它属于"改了不报错但功能没了"那一类。
+      const duplicated = scored.filter((entry) => copiesFor(entry.row.name).total > 1)
+      const duplicatedRepos = new Set(
+        duplicated.map((entry) => String(entry.row.repo)).filter((repo) => repo !== ''),
+      )
+      const hasCrossDomain = duplicated.some((entry) => {
+        const c = copiesFor(entry.row.name)
+        return c.library > 0 && c.catalog > 0
+      })
       const hits = []
-      for (const entry of scored.slice(0, limit)) {
+      for (const entry of shownPool.slice(0, limit)) {
         const located = await resolveRow(entry.row)
+        const isCatalog = entry.row.origin === 'catalog'
         hits.push({
           name: entry.row.name,
+          // catalog 技能不属于任何上游仓库：空字符串是如实的（它确实没有 repo），
+          // 而来源另给一个字段，模型才分得清"没有 repo"和"我们没查"。
           repo: entry.row.repo,
+          ...(isCatalog ? { origin: 'catalog', source: entry.row.catalogSource } : {}),
           description: descLength === 0 ? '' : truncate(entry.row.description, descLength),
           // Empty for every skill whose frontmatter has no whenToUse, which is all of them
           // in most libraries; the field exists so a writer that fills it is rewarded.
           whenToUse: descLength === 0 ? '' : truncate(String(entry.row.whenToUse ?? ''), descLength),
           files: entry.row.files,
-          // Upstream repositories do ship one skill several times over (the same
-          // directory reachable as skills/<name>, plugins/<x>/skills/<name> and
-          // antigravity/skills/<name>). Reporting the copy count is what tells the
-          // model `copies` is worth disambiguating.
-          copies: copiesOf(entry.row.name),
+          // 副本构成按来源分开报（见 `copiesFor`）：库内多份要靠 `repo` 选，
+          // 跨域同名**不能**靠 `repo` 选（catalog 技能不属于任何 repo）。
+          // 合成一个数字会让模型去找一个不存在的 repo 参数。
+          copies: copiesFor(entry.row.name),
           matchCount: entry.matchCount,
           // A row whose SKILL.md is gone means the index is out of date — the normal
           // result of deleting a skill directory without regenerating it. Reporting it
@@ -1142,7 +1467,9 @@ export function buildSkillRouterTools(ctx, register) {
           // for it. This is the answer to "why did this query match / not match".
           ...(entry.why === undefined ? {} : { score: entry.score, why: entry.why }),
           path: located.path,
-          libraryRelative: entry.row.repo + '/' + entry.row.relpath,
+          // `libraryRelative` 只对库行有意义：catalog 行的 repo/relpath 是空的，
+          // 拼出来是 "/"，那不是路径而是噪声。
+          ...(isCatalog ? {} : { libraryRelative: entry.row.repo + '/' + entry.row.relpath }),
         })
       }
       // 索引完整性报警：只在真报警时出现（正常路径零成本、零噪音）。
@@ -1160,11 +1487,18 @@ export function buildSkillRouterTools(ctx, register) {
         // "没有可搜索关键词"的分支上，于是有结果时它反而不出现：分支选错，功能就等于没有。
         starterLibrary: loaded.bundled === true ? true : undefined,
         query,
+        // `total` 仍是命中全量（含只被描述命中的），一个字都不少。
         total: scored.length,
         strict,
+        // 名字里含关键词的命中数。多词查询下它仍如实统计，但**分档不生效**，
+        // 所以此时 `total` 与它相等或不等都不代表"有第二档被挡住"——见 note 的条件。
+        nameMatched,
         shown: hits.length,
         names_only: namesOnly,
-        more: scored.length > hits.length,
+        // `more` 按**已展示的那一档**算：第一档还有没显示完的，才算 more。
+        // 若第一档已全部显示而第二档被挡在后面，那不是"more of the same"，
+        // 而 note 已经说清了第二档的存在与条数。
+        more: shownPool.length > hits.length,
         fallback,
         hits,
         // 只在真报警时出现：详情见 .dsh/SKILLS-POLICY.md §十七·附。
@@ -1181,7 +1515,24 @@ export function buildSkillRouterTools(ctx, register) {
               : 'No library match. Try broader or different keywords, or drop the repo filter; rerun with explain: true to see how each keyword scored against each field.'
             : fallback === 'or'
               ? 'No skill matched every keyword, so these match all but one (matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
-              : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.'),
+              : 'Call skill_load with one exact name to read its full instructions.' +
+                // 分档说明：只在**第二档真的被挡在后面**时才提。
+                // 条件是 `restTier.length > 0` —— 少了它，一句 note 会在"全部命中都在
+                // 名字里"（restTier 为空）时声称"the other 0 match only on description"，
+                // 那是把不存在的东西说成存在。实测这条被 K2 判据抓到过。
+                (singleToken && nameTier.length > 0 && restTier.length > 0
+                  ? weakNameTier
+                    ? ' Warning: no skill NAME contains this word — the matches above are spelling coincidences, ' +
+                      'so the ' + String(restTier.length) + ' description/path matches are shown too.'
+                    : ' These are the ' + String(nameMatched) + ' whose NAME contains a keyword; the other ' +
+                      String(restTier.length) +
+                      ' match only on description or path — search a more specific word to see those.'
+                  : '') +
+                (duplicated.length === 0
+                  ? ''
+                  : hasCrossDomain
+                    ? ' Some names here exist in both the library and this session\'s catalog (copies.library / copies.catalog): pass repo to choose a library copy, and note that a catalog copy has no repo.'
+                    : ' Pass repo too when copies.total > 1.')),
       })
     },
     presentCall(args) {
@@ -1196,7 +1547,7 @@ export function buildSkillRouterTools(ctx, register) {
     const wanted = normName(raw)
     const wantedLower = wanted.toLowerCase()
     const wantedRepo = String(repoHint ?? '').trim().toLowerCase()
-    const missing = { name: raw, source: '', repo: '', copies: 0, path: '', resourceDir: '', content: '', referenceFiles: [], stale: false, error: '' }
+    const missing = { name: raw, source: '', repo: '', copies: { total: 0, library: 0, catalog: 0 }, path: '', resourceDir: '', content: '', referenceFiles: [], stale: false, error: '' }
     if (wanted === '') {
       missing.error = 'a skill name is required'
       return jsonSafe(missing)
@@ -1276,7 +1627,8 @@ export function buildSkillRouterTools(ctx, register) {
             name: String(definition.name),
             source: 'resident',
             repo: '',
-            copies: 1,
+            // 常驻加载走的是 registry 直查，与库/catalog 的副本计数无关：这里是"按名命中了一份"。
+            copies: { total: 1, library: 0, catalog: 1 },
             path: definition.path === undefined ? '' : String(definition.path),
             resourceDir: resourceBase !== undefined && resourceBase.kind === 'directory' ? String(resourceBase.path) : '',
             content: clamped.text,
@@ -1323,7 +1675,7 @@ export function buildSkillRouterTools(ctx, register) {
       name: wanted,
       source: 'library',
       repo: chosen === null ? '' : chosen.repo,
-      copies: chosen === null ? 0 : copiesOf(chosen.name),
+      copies: chosen === null ? { total: 0, library: 0, catalog: 0 } : copiesFor(chosen.name),
       path: skillPath,
       resourceDir: directory,
       content: clamped.text,

@@ -43,7 +43,21 @@ const exec = makeExec(cwd)
 if (libraryRoot === undefined) {
   const hits = await search.execute({ query: 'alpha widgets' }, exec)
   check('search finds a fixture skill', hits.total >= 1 && hits.hits.some((hit) => hit.name === 'alpha-widgets'))
-  check('search reports the copy count', hits.hits.every((hit) => typeof hit.copies === 'number'))
+  // `copies` 从数字变成了按来源分开的对象：库内多份要靠 `repo` 选，跨域同名不能靠 `repo` 选，
+  // 合成一个数字会让模型去找一个不存在的 repo 参数。断言随之改成检查**结构**，
+  // 而不是只检查类型——只查 typeof 的话，`{total, library, catalog}` 三处任一丢失都测不出来。
+  check(
+    'search reports the copy breakdown',
+    hits.hits.every(
+      (hit) =>
+        hit.copies !== null &&
+        typeof hit.copies === 'object' &&
+        typeof hit.copies.total === 'number' &&
+        typeof hit.copies.library === 'number' &&
+        typeof hit.copies.catalog === 'number' &&
+        hit.copies.total === hit.copies.library + hit.copies.catalog,
+    ),
+  )
 
   const one = await load.execute({ name: 'beta-gadgets' }, exec)
   check('single load returns the body', String(one.skills?.[0]?.content ?? '').includes('Fixture body'))
