@@ -77,6 +77,28 @@ check('a query of stop words alone still answers', empty.error !== undefined || 
 const cjk = await search.execute({ query: '做视频' }, exec)
 check('a non-Latin query explains that keywords must be English', /English/i.test(String(cjk.error)), String(cjk.error).slice(0, 90))
 
+// --- a Chinese query that leaves a single ASCII letter behind ------------------
+//
+// This is the case that made the tokenizer's fallback lie. `C盘清理 系统盘治理 磁盘空间` has every
+// Han character replaced by a space, leaving the `C` of `C盘`; the "no keyword at all" fallback
+// then returned `['c']`, which matched 7,643 of 7,700 rows and ranked `c-review` first. The tool
+// reported a full result set for a query whose keywords were entirely absent — worse than
+// reporting nothing, because a model that sees hits has no reason to reword.
+//
+// A Chinese query must land in the same branch as `做视频`, and a query of one stop word must
+// keep the old fallback behaviour (asserted just above).
+const cjkWithLetter = await search.execute({ query: 'C盘清理 系统盘治理 磁盘空间' }, exec)
+check(
+  'a Chinese query that leaves one ASCII letter behind still reports no keyword',
+  /no searchable keyword|English/i.test(String(cjkWithLetter.error)),
+  `error=${String(cjkWithLetter.error).slice(0, 60)} total=${cjkWithLetter.total}`,
+)
+check(
+  'a single stray letter does not return the whole library',
+  cjkWithLetter.hits.length === 0,
+  `shown=${cjkWithLetter.shown}`,
+)
+
 dropFixture(root)
 console.log(problems.length === 0 ? 'stale and duplicates: OK' : 'stale and duplicates FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

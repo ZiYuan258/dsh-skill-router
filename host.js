@@ -361,7 +361,26 @@ function tokenize(query) {
   // the weights reward any name/path hit equally. Words with no discriminative power do
   // not belong in a ranking.
   const meaningful = tokens.filter((token) => token.length > 1 && STOP_WORDS.has(token) === false)
-  return meaningful.length > 0 ? meaningful : tokens
+  if (meaningful.length > 0) return meaningful
+  // ── 回退：只有当剩下的 token 里还有**真正的词**时才放行 ──────────────────────────
+  //
+  // 这条回退的本意是"查询只由停用词组成时，总比说没有关键词好"（`the` / `a` / `of`）。
+  // 但它有个没被想到的入口：
+  //
+  //     "C盘清理 系统盘治理 磁盘空间"  →  tokenizer 把每个汉字替换成空格，
+  //                                      只留下 `C盘` 里的 ASCII 字母 `C`
+  //                                    →  meaningful = []  →  回退  →  tokens = ["c"]
+  //
+  // 实测后果：`["c"]` 命中 **7,643 / 7,700 行（99.3%）**，top1 是毫不相关的 `c-review`。
+  // 这不是"搜不到"，是**假成功** —— 模型看到 12 条像模像样的结果，无从知道其实一个关键词
+  // 都没有。比直接报 no keyword 糟糕得多，因为后者会促使它换词。
+  //
+  // 判据：回退放行的前提是 token 里**至少有一个长度 ≥ 2 的**（`the` 算，`c` 不算）。
+  // 长度 1 的拉丁字母在 7,700 行语料里没有任何区分力 —— 它不是词，是汉字段落里的残留。
+  // 这样中文查询回到它应有的回答（no searchable keyword），而纯停用词查询（`the a of`）
+  // 的返回值**逐字不变**（仍然回退到未过滤的 tokens），非退化路径完全不受影响。
+  const fallback = tokens.filter((token) => token.length > 1)
+  return fallback.length > 0 ? tokens : []
 }
 
 /**
