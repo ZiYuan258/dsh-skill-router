@@ -758,7 +758,9 @@ export function buildSkillRouterTools(ctx, register) {
         if (info !== undefined && info.type === 'file') {
           const display = target.displayPath
           const parent = display.slice(0, Math.max(0, display.length - 'skill-index.tsv'.length))
-          return { root: stripTrailingSlashes(parent), indexTarget: target, version: String(info.version), bundled: false }
+          // rawRoot lets the integrity self-check locate the sibling identity files
+          // (.sha256 / meta.json) without re-walking the workspace.
+          return { root: stripTrailingSlashes(parent), rawRoot: dir, indexTarget: target, version: String(info.version), bundled: false }
         }
       }
       const cut = Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\'))
@@ -770,6 +772,80 @@ export function buildSkillRouterTools(ctx, register) {
     const bundled = await bundledLibraryRoot()
     if (bundled !== undefined) return { root: bundled.root, indexTarget: bundled.target, version: bundled.version, bundled: true }
     return { root: '', indexTarget: undefined, version: '', bundled: false }
+  }
+
+  /**
+   * Index integrity self-check (2026-10-05). Two independent alarms, warn-only — a problem
+   * here must never make a working search fail. Criteria live in
+   * `.dsh/SKILLS-POLICY.md` §十七·附 (the "routine re-run exception" clause).
+   *
+   *  - (1) version skew: the index's fs version differs from the sidecar's ⇒ the index was
+   *        written after its identity files, i.e. an out-of-band edit or an interrupted scan.
+   *  - (1b) identity disagreement: `.sha256` and `meta.json` record different sha256 values.
+   *  - (2) row drift: current row count differs from `meta.json.rowCount` by more than 10%
+   *        ⇒ the size change has to be explained, not absorbed silently.
+   *
+   * This function only reads text through `ctx.fs`; the exact byte-level hash check lives in
+   * `.skill-src/index-integrity.mjs`. Every failure inside here is swallowed: an absent or
+   * unreadable identity file degrades to "no check", never to an error.
+   */
+  async function checkIndexIntegrity(located, rows, signal) {
+    const problems = []
+    if (located.rawRoot === undefined) return { status: 'ok', problems, checked: 'bundled starter library' }
+    const lib = joinPath(located.rawRoot, '.skill-src')
+    const readSibling = async (name) => {
+      const target = await ctx.fs.resolve(joinPath(lib, name), { signal })
+      if (target === undefined) return undefined
+      const info = await ctx.fs.stat(target)
+      if (info === undefined || info.type !== 'file') return undefined
+      return { target, info, text: await ctx.fs.readText(target, signal) }
+    }
+    try {
+      const side = await readSibling('skill-index.tsv.sha256')
+      if (side !== undefined) {
+        // 版本戳只做**顺序**比较，不做相等比较：scan-skills.ps1 本来就先写索引、后写 sidecar，
+        // 两者的 mtime 相差几百毫秒是正常形态——按相等比会每次合法重跑都误报（已实测）。
+        // 只有「索引比身份文件**新**」才值得报警；两边任一不是数字就放弃这条判据。
+        const idxVersion = Number(located.version)
+        const sideVersion = Number(side.info.version)
+        if (Number.isFinite(idxVersion) && Number.isFinite(sideVersion) && idxVersion > sideVersion) {
+          problems.push(
+            'the index was written after its identity file (index version ' + String(located.version) +
+            ' > sidecar ' + String(side.info.version) + ') — an out-of-band edit, or the last scan was interrupted'
+          )
+        }
+        const sideHash = String(side.text ?? '').trim().split(/\s+/)[0]
+        if (sideHash !== '') {
+          try {
+            const meta = await readSibling('skill-index.meta.json')
+            const parsed = meta === undefined ? undefined : JSON.parse(meta.text)
+            if (parsed !== undefined && String(parsed?.sha256 ?? '') !== '' && String(parsed.sha256) !== sideHash) {
+              problems.push(
+                'identity files disagree: skill-index.tsv.sha256 says ' + sideHash.slice(0, 12) +
+                '… but skill-index.meta.json says ' + String(parsed.sha256).slice(0, 12) + '…'
+              )
+            }
+          } catch { /* meta.json is optional */ }
+        }
+      }
+    } catch { /* sidecar is optional */ }
+    try {
+      let recorded
+      try {
+        const meta = await readSibling('skill-index.meta.json')
+        if (meta !== undefined) recorded = Number(JSON.parse(meta.text)?.rowCount)
+      } catch { recorded = undefined }
+      if (Number.isFinite(recorded) && recorded > 0) {
+        const drift = Math.abs(rows.length - recorded) / recorded
+        if (drift > 0.1) {
+          problems.push(
+            'row count drifted ' + (drift * 100).toFixed(1) + '% against skill-index.meta.json (' +
+            String(rows.length) + ' now vs ' + String(recorded) + ' recorded) — over the 10% threshold'
+          )
+        }
+      }
+    } catch { /* meta.json is optional */ }
+    return { status: problems.length === 0 ? 'ok' : 'alarm', problems }
   }
 
   /** Parse + cache the index; the fs version invalidates the cache when the file changes. */
@@ -797,9 +873,11 @@ export function buildSkillRouterTools(ctx, register) {
       counts.set(key, (counts.get(key) ?? 0) + 1)
     }
     nameCounts = counts
+    // 索引完整性自检：只在缓存未命中（即真的重读了索引）时算一次，报警不阻止。
+    const indexIntegrity = await checkIndexIntegrity(located, rows, signal)
     // `bundled` 一路带到工具返回值：用户看到的是入门技能时必须说清楚，否则他会以为
     // 自己的库被读到了（而那时真正的诊断方向完全不同）。
-    const value = { rows, root: located.root, error: '', bundled: located.bundled === true }
+    const value = { rows, root: located.root, error: '', bundled: located.bundled === true, indexIntegrity }
     indexCache = { key, value }
     return value
   }
@@ -1067,6 +1145,14 @@ export function buildSkillRouterTools(ctx, register) {
           libraryRelative: entry.row.repo + '/' + entry.row.relpath,
         })
       }
+      // 索引完整性报警：只在真报警时出现（正常路径零成本、零噪音）。
+      const indexAlarm = loaded.indexIntegrity?.status === 'alarm' ? loaded.indexIntegrity : undefined
+      const alarmNote = indexAlarm === undefined
+        ? ''
+        : 'INDEX INTEGRITY ALARM — ' + indexAlarm.problems.join(' | ') +
+          '. Likely cause: the index was edited by hand or by another tool without running scan-skills.ps1, ' +
+          'or the last scan was interrupted. See skill-index.meta.json and skill-index.dropped.tsv next to the ' +
+          'index; rerun scan-skills.ps1 to realign. '
       return jsonSafe({
         library: loaded.root,
         // 只有当这次真的读的是随插件发布的入门库时才出现。用户必须能分辨"我的库被读到了"和
@@ -1081,10 +1167,13 @@ export function buildSkillRouterTools(ctx, register) {
         more: scored.length > hits.length,
         fallback,
         hits,
+        // 只在真报警时出现：详情见 .dsh/SKILLS-POLICY.md §十七·附。
+        indexAlarm: indexAlarm === undefined ? undefined : indexAlarm.problems,
         error: '',
         explain: explaining,
         note:
-          hits.length === 0
+          alarmNote +
+          (hits.length === 0
             ? fallback === 'weak'
               ? 'Nothing contained every keyword, and the closest partial matches each shared only one of ' +
                 String(tokens.length) +
@@ -1092,7 +1181,7 @@ export function buildSkillRouterTools(ctx, register) {
               : 'No library match. Try broader or different keywords, or drop the repo filter; rerun with explain: true to see how each keyword scored against each field.'
             : fallback === 'or'
               ? 'No skill matched every keyword, so these match all but one (matchCount of ' + String(tokens.length) + '). Search again with fewer words to get an exact match.'
-              : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.',
+              : 'Call skill_load with one exact name to read its full instructions; pass repo too when copies > 1.'),
       })
     },
     presentCall(args) {
