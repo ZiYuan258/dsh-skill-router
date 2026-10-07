@@ -400,7 +400,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.16.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.16.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -449,7 +449,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.16.0 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.16.1 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
