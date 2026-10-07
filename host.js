@@ -1282,8 +1282,14 @@ export function buildSkillRouterTools(ctx, register) {
           lines.push('- ' + String(hit.name) + where + (String(hit.description) === '' ? '' : '\n    ' + String(hit.description)))
           // Surface the trigger phrasing only when it says something the description does
           // not, so a library that fills both does not pay for the duplication twice.
-          if (String(hit.whenToUse) !== '' && String(hit.whenToUse) !== String(hit.description)) {
-            lines.push('    when: ' + String(hit.whenToUse))
+          //
+          // `?? ''` 不是多余的：真实 hit 一定会带 `whenToUse`（execute 里统一赋值），
+          // 但 `String(undefined)` 是 `'undefined'`，而它 `!== ''` 恒真 ⇒
+          // 一旦某个调用方漏设该字段，渲染就会输出字面的 `when: undefined`。
+          // 渲染层的职责是"输出的每个字都是给模型看的"，所以这里按缺失处理。
+          const whenText = String(hit.whenToUse ?? '')
+          if (whenText !== '' && whenText !== String(hit.description)) {
+            lines.push('    when: ' + whenText)
           }
           if (Array.isArray(hit.why)) {
             lines.push('    why: ' + hit.why.join('; '))

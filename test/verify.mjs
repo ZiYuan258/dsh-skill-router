@@ -124,6 +124,39 @@ const cleanRender = searchTool.output.render(
 const cleanText = Array.isArray(cleanRender) ? cleanRender.map((part) => String(part.text ?? '')).join('\n') : ''
 check('a healthy index renders no alarm banner', /INDEX INTEGRITY ALARM/.test(cleanText) === false, cleanText.slice(0, 120))
 
+// --- the rendered text must not leak JavaScript's own words ------------------
+//
+// Found while driving the alarm test above: a hit whose `whenToUse` is missing rendered as a
+// literal `when: undefined`, because `String(undefined)` is `'undefined'` and that is not `''`.
+// Real hits always carry the field, so this never reached a user — but the renderer's contract is
+// that every character in its output is meant for the model, and `undefined` is not.
+const leakRender = searchTool.output.render(
+  { query: 'anything' },
+  {
+    library: 'X',
+    total: 1,
+    strict: 1,
+    nameMatched: 1,
+    shown: 1,
+    fallback: 'none',
+    error: '',
+    hits: [
+      {
+        name: 'leaky',
+        repo: 'some-repo',
+        description: 'A row whose whenToUse is absent, as a defensive shape.',
+        copies: { total: 1, library: 1, catalog: 0 },
+        matchCount: 1,
+        stale: false,
+        path: 'p',
+      },
+    ],
+  },
+)
+const leakText = Array.isArray(leakRender) ? leakRender.map((part) => String(part.text ?? '')).join('\n') : ''
+check('a missing whenToUse does not render the word undefined', /undefined/.test(leakText) === false, leakText.slice(0, 160))
+check('a missing whenToUse does not render a when: line at all', /\bwhen:/.test(leakText) === false, leakText.slice(0, 160))
+
 // --- a catalog row must never be labelled STALE just because ctx.fs cannot read it ---------
 //
 // The second defect from the same restart: bundled skills live inside `app.asar`, which is a
