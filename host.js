@@ -823,6 +823,25 @@ export function buildSkillRouterTools(ctx, register) {
    * `list` 可能不是函数，收集可能失败。**任何一种情况都退化为今天的"只有库"，绝不让搜索失败**
    * —— 目录是增益，不是依赖。
    *
+   * ── `scope` 跟着 harness 自己的调用形状走（一次撤回记录）
+   *
+   * 本函数一度去掉了 `scope`，依据是第三方 GUI 的技能看板调 `registry.snapshot({ cwd })`
+   * 不带 scope。**那个依据不成立**，已撤回：
+   *   - `@linxin666/dsh-client-ui-skill-explorer/lib/index.js:529-534` 显示，它那三组技能
+   *     **主要来自 `scanSkillRoot()`（直接扫磁盘）**；`:539` 的 `registry.snapshot({cwd})`
+   *     只是**叠加补充**。拿一个补充调用当"正确形状"是本末倒置。
+   *   - harness 自己有两个独立调用点，**都传 scope**：
+   *       `dsh-tool-skill/lib/index.js:140-144`（skill 工具 execute）→ `scope: exec.agent`
+   *       `dsh-tool-skill/lib/index.js:207-210`（目录块 pre-step）  → `scope: agent`
+   *
+   * ⇒ 与 harness 保持一致：`scope: exec.agent`。
+   *
+   * 这次撤回**无损失**，因为「registry 里缺 project-dsh / user-agents」并不是 scope 造成的 ——
+   * 原生 `skill` 工具同样传 scope、同样看不到那两个根（实测 `skill hindsight-coding-agent`
+   * 与 `skill keep-the-why` 都报 "unknown or no longer available"），**两者行为一致**。
+   * 那是 provider 配置问题（`include:skill-filesystem` 出厂行是 `inactive`，
+   * 而活动的 `include:dsh-agent-preset-skills` 带 `includeDefaultRoots: false`），见 POLICY §31。
+   *
    * @returns summary 数组，或空数组。永不抛出。
    */
   async function loadCatalog(cwd, scope, signal) {
@@ -893,15 +912,35 @@ export function buildSkillRouterTools(ctx, register) {
         // 返回 missing: false，让下游把 path 留空而不是说它坏了。
         return { directory: '', path: '', missing: false }
       }
+      // ── ★ catalog 行不靠 `ctx.fs` 判定 stale（v1.16.0 真实环境验证时发现）
+      //
+      // 曾经的写法是 `ctx.fs.resolve(catalogPath)` + `ctx.fs.stat()`，失败就报 STALE。
+      // 真实环境里这**把三条完全健康的 bundled 技能全标成了 "STALE: SKILL.md is missing"**
+      // （`editing-cordis-compositions` / `cordis-composition-reference` / `cordis-plugin-development`）。
+      //
+      // 根因：bundled 的 `bundledSkillDir` 指向 **`app.asar` 内部**，而 `app.asar` 是一个**文件**
+      // （121 MB），不是目录。宿主进程自己的文件读取能穿透它（实测 `skill_load
+      // cordis-plugin-development` 成功，`source: resident`），但 `ctx.fs` 这门面打不开。
+      //
+      // ⇒ 教训不是"要换个 API 探测"，而是**"读不到"不等于"不存在"**：
+      //    - catalog 是 registry 交来的条目，provider 在**收集阶段**已经解析过它；
+      //    - `path` 打不开只说明"我这门面读不到"，不说明它不在。
+      //    把前者渲染成后者，是**对一条健康的技能撒谎** —— 比不报更糟。
+      //
+      // 所以这里只做**尽力而为**的目录解析（为了把 `path` 给全），**从不据此报 stale**。
+      // 真正的"能不能加载"由 `skill_load` 回答：它走 `skills.get()` 让 provider 自己读，
+      // 成功与否是权威结论，而那条路径压根不碰 `ctx.fs`（见 `loadSkill` 的 resident 回退）。
+      let display = catalogPath
       try {
         const target = await ctx.fs.resolve(catalogPath)
-        const display = String(target.displayPath ?? catalogPath)
-        const info = await ctx.fs.stat(target)
-        if (info === undefined) return { directory: '', path: display, missing: true }
-        return { directory: stripTrailingSlashes(display.slice(0, Math.max(0, display.length - 'SKILL.md'.length))), path: display, missing: false }
+        display = String(target.displayPath ?? catalogPath)
       } catch {
-        // 目录说它在、文件系统说不在了：这才是真正的 stale，如实报。
-        return { directory: '', path: catalogPath, missing: true }
+        /* 读不到就原样用 catalog 给的路径 —— 它是 provider 报的，比我们猜的可信 */
+      }
+      return {
+        directory: stripTrailingSlashes(display.slice(0, Math.max(0, display.length - 'SKILL.md'.length))),
+        path: display,
+        missing: false,
       }
     }
     const joined = joinPath(joinPath(joinPath(rootDir, row.repo), row.relpath), 'SKILL.md')
@@ -1254,6 +1293,26 @@ export function buildSkillRouterTools(ctx, register) {
           if (hit.stale === true) lines.push('    STALE: SKILL.md is missing — regenerate the index')
         }
         if (String(result.error) !== '') lines.push('error: ' + String(result.error))
+        // ★ 索引完整性报警必须出现在**渲染文本**里，不能只放在 `note`。
+        //
+        // 这是一个真实被漏掉的缺陷（v1.16.0 发布后重启验证时发现）：报警文字全部写进了
+        // `result.note`，而 `render()` **从来不输出 note** —— 它只渲染 `hits` / `error` /
+        // `stale` / 重名提示。模型读的是这段渲染文本，不是工具返回的 JSON，
+        // 所以报警等于**永远不可见**：功能存在、字段存在、mock 测试全绿，真实环境全瞎。
+        //
+        // 漏掉的原因值得记：mock 测试断言的是 `result.indexAlarm` 与 `result.note`（JSON 层），
+        // **没有一条断言渲染文本**。判据选在了错误的层面 —— 见 POLICY §28.1。
+        // 修法不只是把它加进来，还要在 `test/verify.mjs` 里补一条渲染层断言，
+        // 否则下次改 render 还会静默丢掉它。
+        if (Array.isArray(result.indexAlarm) && result.indexAlarm.length > 0) {
+          lines.push('')
+          lines.push('⚠ INDEX INTEGRITY ALARM — the index does not match its identity files:')
+          for (const problem of result.indexAlarm) lines.push('  · ' + String(problem))
+          lines.push('  The index was probably edited by hand or by another tool without running scan-skills.ps1,')
+          lines.push('  or the last scan was interrupted. Rerun scan-skills.ps1 to realign; the details are in')
+          lines.push('  skill-index.meta.json and skill-index.dropped.tsv next to the index. Search results below')
+          lines.push('  are still shown, but treat them as unverified.')
+        }
         // The note tells the model to pass `repo` when copies > 1, so the count has to be
         // visible: the JSON carries it, but the model reads this text, not the JSON.
         //

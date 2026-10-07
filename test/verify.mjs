@@ -4,6 +4,7 @@
 // Uses no assertion library: it fails by exiting non-zero on any unexpected result.
 import { buildSkillRouterTools, inject, name } from '../host.js'
 import { findLibrary, makeExec, makeFixture, makeFsContext } from './helpers.mjs'
+import { join } from 'node:path'
 
 const problems = []
 const check = (label, condition, detail) => {
@@ -82,6 +83,85 @@ if (libraryRoot === undefined) {
 
 const miss = await load.execute({ name: 'definitely-not-a-skill-xyz' }, exec)
 check('unknown name reports an actionable error', String(miss.skills?.[0]?.error ?? '').includes('skill_search'))
+
+// --- the alarm must reach the RENDERED text, not only the JSON ---------------
+//
+// v1.16.0 shipped an index-integrity alarm that the model could never see: the text went into
+// `result.note`, and `render()` never emitted `note` — it renders hits, errors, stale rows and
+// the duplicate hint, and nothing else. Every test passed, because they all asserted the JSON
+// (`result.indexAlarm`, `result.note`) and none asserted what the model actually reads.
+//
+// Found only by restarting and calling the real tool. This block is the missing layer: it drives
+// `render()` with a synthetic alarm and requires the text to carry it. It deliberately does NOT
+// go through `execute()` — a real alarm needs a corrupted index on disk, and a test that needs a
+// broken fixture to prove a rendering path is a test nobody will keep running.
+const searchTool = registrations.get('skill_search')
+const rendered = searchTool.output.render(
+  { query: 'anything' },
+  {
+    library: 'X',
+    total: 0,
+    strict: 0,
+    shown: 0,
+    fallback: 'none',
+    hits: [],
+    error: '',
+    note: 'Call skill_load with one exact name.',
+    indexAlarm: ['the index was written after its identity file (index version 1 > sidecar 0)'],
+  },
+)
+const renderedText = Array.isArray(rendered) ? rendered.map((part) => String(part.text ?? '')).join('\n') : ''
+check('an index alarm is rendered into the text the model reads', /INDEX INTEGRITY ALARM/.test(renderedText), renderedText.slice(0, 120))
+check('the rendered alarm carries the specific problem', /written after its identity file/.test(renderedText), renderedText.slice(0, 160))
+check('the rendered alarm says how to fix it', /scan-skills\.ps1/.test(renderedText), renderedText.slice(0, 200))
+check('the rendered alarm says results are still shown but unverified', /unverified/.test(renderedText), renderedText.slice(0, 240))
+
+// The same call with no alarm must stay clean — otherwise the block above would pass on noise.
+const cleanRender = searchTool.output.render(
+  { query: 'anything' },
+  { library: 'X', total: 0, strict: 0, shown: 0, fallback: 'none', hits: [], error: '', note: 'nothing to see' },
+)
+const cleanText = Array.isArray(cleanRender) ? cleanRender.map((part) => String(part.text ?? '')).join('\n') : ''
+check('a healthy index renders no alarm banner', /INDEX INTEGRITY ALARM/.test(cleanText) === false, cleanText.slice(0, 120))
+
+// --- a catalog row must never be labelled STALE just because ctx.fs cannot read it ---------
+//
+// The second defect from the same restart: bundled skills live inside `app.asar`, which is a
+// FILE, so `ctx.fs` cannot open the path even though the host process reads it fine (measured:
+// `skill_load cordis-plugin-development` succeeds with `source: resident`). Stat-ing the path and
+// reporting the failure labelled three perfectly healthy skills "STALE: SKILL.md is missing".
+//
+// "Cannot read it from here" is not "it is not there". The rule under test: a catalog row's
+// `stale` stays false even when every fs call for it throws.
+{
+  const unreadable = makeFsContext(libraryRoot ?? fixture ?? '.')
+  const realResolve = unreadable.fs.resolve
+  unreadable.fs.resolve = async (path) => {
+    // Everything works except the catalog path — exactly the asar case.
+    if (String(path).includes('unreadable-catalog-skill')) throw new Error('ENOENT: asar is a file')
+    return await realResolve(path)
+  }
+  const catalogEntry = {
+    name: 'unreadable-catalog-skill',
+    path: join('Z:', 'app.asar', 'skills', 'unreadable-catalog-skill', 'SKILL.md'),
+    description: 'A catalog skill whose path the virtual fs cannot open. Used to prove a row is not called stale for that reason.',
+    invocation: { modelInvocable: true, userInvocable: true },
+    source: 'bundled',
+    provider: 'filesystem',
+  }
+  unreadable.get = (service) => (service === 'skills' ? { async list() { return [catalogEntry] }, async get() { return undefined } } : undefined)
+  const isolated = new Map()
+  buildSkillRouterTools(unreadable, (toolName, tool) => isolated.set(toolName, tool))
+  const found = await isolated.get('skill_search').execute({ query: 'unreadable catalog skill' }, exec)
+  const row = (found.hits ?? []).find((hit) => hit.name === 'unreadable-catalog-skill')
+  check('an unreadable catalog path still reaches the results', row !== undefined, 'hits=' + (found.hits ?? []).map((h) => h.name).join(', '))
+  check('an unreadable catalog path is NOT reported as stale', row !== undefined && row.stale === false, 'stale=' + String(row?.stale))
+  check('an unreadable catalog path is still offered by its own absolute path', row !== undefined && String(row.path).includes('unreadable-catalog-skill'), String(row?.path))
+  if (row !== undefined) {
+    const text = isolated.get('skill_search').output.render({ query: 'x' }, found).map((part) => String(part.text ?? '')).join('\n')
+    check('the rendered text does not call that row STALE', text.includes('STALE') === false, text.slice(0, 160))
+  }
+}
 
 const empty = await load.execute({}, exec)
 check('empty call explains how to pass a name', String(empty.note ?? '').includes('Pass name'))
