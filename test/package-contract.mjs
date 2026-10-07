@@ -102,6 +102,33 @@ ok('导出 inject', /export const inject\s*=/.test(hostSource))
 // So: a regex whose body ends in `+$` or `*$` is reported unless that quantifier follows a
 // character class. The suffix check is two characters wide and says exactly which shape it
 // allows, rather than trying to parse the pattern.
+//
+// ── v1.16.0 起的修正：**简写字符类**（`\d` `\w` `\s`）与 `[...]` 同类 ──────────────────
+//
+// 本条最初只放行 `]*$` / `]*$/flags` 两种拼写，于是 `versionTimestampNs` 里的 `/^\d+$/`
+// 被误报。判定理由是实测的，不是"看起来没问题"：
+//
+//     最坏输入（N 个数字 + 1 个非数字）：
+//       /^\d+$/       N=5,000,000 → 7.8 ms     规模 ×5 ⇒ 耗时 ×3.1   （线性）
+//       /[\\/]+$/     N=   16,000 → 187 ms     规模 ×2 ⇒ 耗时 ×4.2   （二次）
+//
+// `\d` 与 `[0-9]` 是同义的**单字符类**，不含分支、不嵌套量词 ⇒ 每个位置只有一条前进路径。
+// 它被漏掉，是因为豁免判据认的是**字面拼写**（`]`），而不是**语义**（"量词落在字符类上"）。
+// ⇒ 把 `\d` `\w` `\s`（含取反的 `\D` `\W` `\S`）一并认作字符类。
+//
+// ⚠️ 这里的字符串必须写**一个**反斜杠加字母（`'\\d'` 在源码里就是两字符 `\d`）。
+//    第一版我写成 `'\\\\d'`（JS 源码的转义形态），集合里存的是 `\\d`，
+//    于是与真实 body 里的 `\d` 永不相等 —— 豁免成了死代码。
+//    这与本文件上面那条注释记的是同一个坑："Getting this suffix wrong the first time made
+//    the exemption dead code, which the check's own failure reported."（历史上已犯过一次）
+const CLASS_SHORTHANDS = new Set(['\\d', '\\w', '\\s', '\\D', '\\W', '\\S'])
+const endsInQuantifiedClass = (body) => {
+  // `[...]+$` 或 `[...]*$`，允许尾随 flags
+  if (body.endsWith(']*$/') || /\]\*\$\/[gimsuy]*$/.test(body)) return true
+  // `\d+$` / `\d*$`，同样允许 flags
+  const m = /(\\.)(\+|\*)\$\/[gimsuy]*$/.exec(body)
+  return m !== null && CLASS_SHORTHANDS.has(m[1])
+}
 const regexLiteral = /\/(?:\\.|[^/\\\n])+\/[gimsuy]*/g
 
 for (const [label, source] of [['host.js', hostSource], ['client.js', clientSource]]) {
@@ -117,7 +144,7 @@ for (const [label, source] of [['host.js', hostSource], ['client.js', clientSour
       // The literal ends with `$/` (or `$/flags`), so the shape to allow is `]*$/`: the
       // quantifier sits on a character class. Getting this suffix wrong the first time made
       // the exemption dead code, which the check's own failure reported.
-      if (body.endsWith(']*$/') || /\]\*\$\/[gimsuy]*$/.test(body)) continue
+      if (endsInQuantifiedClass(body)) continue
       offenders.push('line ' + (index + 1) + ' ' + body)
     }
   })

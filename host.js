@@ -752,6 +752,29 @@ function jsonSafe(value) {
 }
 
 /**
+ * 从 `ctx.fs` 的不透明 version 串里取出**可比的时间戳**（纳秒），取不到返回 `undefined`。
+ *
+ * 真实格式（`dsh-fs-local/lib/index.js:146` 逐字）：
+ *     FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+ * ⇒ 第 4 段是 `mtimeNs`，纳秒级、单调 —— 正是"哪个文件更新"的答案。
+ *
+ * 为什么要一个专门的函数而不是 `Number()`：整串 `Number()` 得 `NaN`，
+ * 而 `NaN` 的比较恒假会把判据**静默**变成"永不报警"。这个坑 v1.16.0 真机复验时踩过。
+ *
+ * 兜底：段数不符、或该段不是数字串 ⇒ `undefined`（调用方据此放弃该判据，并如实报告）。
+ * 也接受**纯数字**串，因为 mock/测试与旧实现会给这种形态。
+ */
+function versionTimestampNs(version) {
+  const text = String(version ?? '')
+  if (text === '') return undefined
+  const parts = text.split(':')
+  const candidate = parts.length >= 4 ? parts[3] : parts.length === 1 ? parts[0] : undefined
+  if (candidate === undefined || /^\d+$/.test(candidate) === false) return undefined
+  const value = Number(candidate)
+  return Number.isFinite(value) ? value : undefined
+}
+
+/**
  * Build the two tool definitions against one plugin context.
  *
  * The definitions are assembled with `definePortableTool`, so they reach the registry
@@ -1060,13 +1083,38 @@ export function buildSkillRouterTools(ctx, register) {
       if (side !== undefined) {
         // 版本戳只做**顺序**比较，不做相等比较：scan-skills.ps1 本来就先写索引、后写 sidecar，
         // 两者的 mtime 相差几百毫秒是正常形态——按相等比会每次合法重跑都误报（已实测）。
-        // 只有「索引比身份文件**新**」才值得报警；两边任一不是数字就放弃这条判据。
-        const idxVersion = Number(located.version)
-        const sideVersion = Number(side.info.version)
-        if (Number.isFinite(idxVersion) && Number.isFinite(sideVersion) && idxVersion > sideVersion) {
+        //
+        // ── ★ `ctx.fs` 的 version 是**不透明复合串**，不能 `Number()`（v1.16.0 复验时发现）
+        //
+        // 初版写的是 `Number(located.version) > Number(side.info.version)`，结果**真实环境里
+        // 报警永不出现**（mock 里我给的是纯毫秒数字串，所以 mock 通过、真机静默全瞎）。
+        // 真实格式出自 `dsh-fs-local/lib/index.js:146` 逐字：
+        //
+        //     FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+        //
+        // 即 `"0:12345:3910032:1791297073405000000:1791139170108000000"` —— `Number()` 得 `NaN`，
+        // `Number.isFinite()` 恒假，**整条判据被静默跳过**（连"放弃这条判据"的注释都掩盖了它）。
+        // 类型注释也写着它是 "Opaque version token" —— 对一个自称不透明的串做算术，是根上的错。
+        //
+        // 修法：只取**可比的那一段** —— 第 4 个字段 `mtimeNs`（纳秒，单调递增，正是"谁更新"的答案）。
+        // 段数不符（未来格式变了）就放弃这条判据，**且不再静默**：记进 problems 的体检项。
+        const idxVersion = located.version
+        const sideVersion = side.info.version
+        const idxNs = versionTimestampNs(idxVersion)
+        const sideNs = versionTimestampNs(sideVersion)
+        if (idxNs !== undefined && sideNs !== undefined) {
+          if (idxNs > sideNs) {
+            problems.push(
+              'the index was written after its identity file (index mtime ' + String(idxNs) +
+              ' > sidecar ' + String(sideNs) + ') — an out-of-band edit, or the last scan was interrupted'
+            )
+          }
+        } else if (String(idxVersion).includes(':') || String(sideVersion).includes(':')) {
+          // 有冒号说明它是复合串但段数不符 ⇒ 格式变了，判据失效。如实报出来，
+          // 而不是像初版那样"不满足 isFinite 就安静跳过"。
           problems.push(
-            'the index was written after its identity file (index version ' + String(located.version) +
-            ' > sidecar ' + String(side.info.version) + ') — an out-of-band edit, or the last scan was interrupted'
+            'could not compare index and sidecar versions (unrecognized version token format: "' +
+            String(idxVersion).slice(0, 60) + '" vs "' + String(sideVersion).slice(0, 60) + '") — the ordering check is inactive'
           )
         }
         const sideHash = String(side.text ?? '').trim().split(/\s+/)[0]

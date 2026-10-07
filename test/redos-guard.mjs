@@ -112,6 +112,25 @@ for (const site of bounded) {
 //
 // 只认最直白的那种：行内出现 `/`、其后不远处的 `+` 或 `*` 紧跟 `$`，且中间不是 `//` 注释。
 // 宁可漏报（漏了由 code review 兜）也不要再引入一个自己的回溯风险。
+//
+// ── 为什么第 2 条（`/^\d+$/`）可以留：输入是否有界的论证 ──────────────────────────
+//
+// 这是本文件要求的"每多一条都要做的论证"，逐条写在这里，而不是把计数改成 2 了事。
+//
+// 用例：`versionTimestampNs()`（host.js）对 `ctx.fs.stat().version` 的**单个冒号段**做校验。
+//
+//   1. **输入有界**：候选串先 `split(':')`，只取**一段**送去匹配；段长上限是整个 version 串
+//      的长度，而它由 `dsh-fs-local` 用固定 5 个字段拼成（`dev:ino:size:mtimeNs:ctimeNs`），
+//      每段都是定长数字。不存在"用户可控的长串"。
+//   2. **形状不是 (a|b)\* 型**：`\d` 是单字符类，不含分支、不嵌套量词 ⇒ 引擎在每个位置
+//      只有一条前进路径，失配即停，回溯为 O(n) 而非 O(2^n)。
+//      对照第 1 条 `/[\\/]+$/` —— 它在 `$` 处失配时会对**每一段可能的起点**重试，那才是二次增长。
+//   3. **锚点方向安全**：`^...$` 两端锚定，且 `$` 前的 `+` 只能吃数字；一旦遇到非数字字符
+//      （例如误传进来的 `missing:<target>` 这种形态），引擎在第一个非数字处即失败，
+//      不会滑到串尾再回退。
+//
+// ⇒ 结论：这一条**不构成本文件在防的那类风险**，保留；计数从 1 改为 2，并把论证留在上面。
+//   （判据来自实测：用 `'0:1:2:notanumber:3'` 与 174 万字符的纯数字串分别试过，均线性返回。）
 function looksLikeTailQuantifierRegex(line) {
   const code = line.trim()
   if (code.startsWith('*') || code.startsWith('//')) return false
@@ -126,7 +145,11 @@ function looksLikeTailQuantifierRegex(line) {
 }
 
 const tailCount = hostSource.split('\n').filter(looksLikeTailQuantifierRegex).length
-ok('host.js 里"量词 + $"正则的条数为 1（' + tailCount + '）', tailCount === 1, '每多一条都需要一次"输入是否有界"的论证')
+ok(
+  'host.js 里"量词 + $"正则的条数为 2（' + tailCount + '）',
+  tailCount === 2,
+  '每多一条都需要一次"输入是否有界"的论证 —— 第 2 条（versionTimestampNs 的 /^\\d+$/）的论证写在本文件第 104 行起',
+)
 
 console.log(problems.length === 0 ? '\n回溯护栏: OK' : '\n回溯护栏 FAILED:\n  ' + problems.join('\n  '))
 if (problems.length > 0) process.exitCode = 1

@@ -150,7 +150,17 @@ export function makeFsContext(cwd) {
         const fs = await import('node:fs/promises')
         const info = await fs.stat(target.targetKey).catch(() => undefined)
         if (info === undefined) return undefined
-        return { version: String(info.mtimeMs), type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size }
+        // `version` 必须**忠实地**复刻 `ctx.fs` 的真实形态，否则测的是一个不存在的世界。
+        //
+        // 真实格式（`dsh-fs-local/lib/index.js:146` 逐字）：
+        //     FsVersion(`${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`)
+        //
+        // 这里曾经是 `String(info.mtimeMs)` —— 一个纯数字串。正因为它"看起来合理"，
+        // v1.16.0 的顺序判据（当时写成 `Number(a) > Number(b)`）在 mock 下**通过**、
+        // 在真机下**静默永不报警**：真串带冒号，`Number()` 得 `NaN`，而 `NaN > x` 恒假。
+        // 缺陷因此躲过 30 个测试 —— **mock 与真机的形状差，就是测试的盲区**。
+        const version = `${String(info.dev ?? 0)}:${String(info.ino ?? 0)}:${String(info.size)}:${String(info.mtimeNs ?? Math.round(info.mtimeMs * 1e6))}:${String(info.ctimeNs ?? Math.round(info.ctimeMs * 1e6))}`
+        return { version, type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size }
       },
       async readText(target) {
         const fs = await import('node:fs/promises')
