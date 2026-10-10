@@ -12,7 +12,7 @@ dsh plugin --profile web add github:ZiYuan258/dsh-skill-router
 >
 > **1. The owner has to be `ZiYuan258`.** Eight repositories on GitHub share this name (this one is the newest, created 2026-09-23). Several of them **auto-inject**: they read the user's message before the model answers and put a skill's full body straight into the prompt.
 >
-> **2. This plugin never auto-loads or injects a skill's body — but it does auto-suggest, deliberately.** At the start of a task it may put **a few candidate skill names (names only, never bodies)** in front of the agent, and **whether anything gets loaded is the agent's decision**, including loading nothing at all. A comparison table of the same-named repositories is further down.
+> **2. This plugin never auto-loads or injects a skill's body — and since v1.16.2 it does not auto-suggest either (off by default).** It used to put **a few candidate skill names (names only, never bodies)** in front of the agent, but measured use showed 0 spontaneous loads across 45 injected turns (see below), so injection is now off by default. A comparison table of the same-named repositories is further down.
 
 > **Only a dozen or two skills? This plugin is not for you.**
 > A single task usually uses just a few skills, so **when the set is small, keeping them resident is cheaper** — the catalog is DSH's native mechanism and it works. This plugin addresses the other situation: **more skills than will fit in the catalog.**
@@ -25,11 +25,11 @@ dsh plugin --profile web add github:ZiYuan258/dsh-skill-router
 |---|---|---|
 | **`skill_load` direct lookup** | **The only channel proven to work**: when the name is known or you have seen it | The single positive case in natural conversation was on this path |
 | **`skill_search` query interface** | **A search when you explicitly want a skill**, not responsible for making the model think to look | See "How it works" for domain and ranking |
-| **Injection layer (HIGH candidate hints)** | **Faithfully surfaces candidates, does not drive usage** | 45 injected turns, 0 spontaneous loads |
+| **Injection layer (HIGH candidate hints)** | **Off by default (v1.16.2); previously surfaced candidates, measured 0 spontaneous loads** | 45 injected turns, 0 spontaneous loads |
 
 **It is neither "automatic skill triggering" nor "teaching the model to use skills".**
 
-> **A falsified hypothesis.** The injection layer was designed around "the agent does not fail to use skills, it is never told which ones are worth considering." After putting candidates in front of the model, **spontaneous loading remained at 0** (45 injected turns, 18 reachable units, three forms each tested once; see "Task-aware skill discovery"). ⇒ **pointer injection does not change model behaviour; this plugin's value is in query and display, not in driving usage.**
+> **A falsified hypothesis.** The injection layer was designed around "the agent does not fail to use skills, it is never told which ones are worth considering." After putting candidates in front of the model, **spontaneous loading remained at 0** (45 injected turns, 18 reachable units, three forms each tested once; see "Task-aware skill discovery"). ⇒ **pointer injection does not change model behaviour; this plugin's value is in query and display, not in driving usage.** As of v1.16.2 the injection layer is off by default (set `DSH_SKILL_ROUTER_INJECT_TIERS=HIGH` to re-enable, for continued observation only).
 
 ## Do you need it
 
@@ -400,7 +400,7 @@ The plugin ships a Client half that adds a **技能 / Skills** tab to the conver
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.16.1 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.16.2 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **Zero model tokens.** The data comes entirely from the **session ledger**, handed to the component by the session-scoped slot:
@@ -449,7 +449,7 @@ the window grew                          <- secondary: a live append can grow it
 
 **Every page is folded into the accumulator the moment it is read.** This matters more than the judgement: the accumulator used to be written only when the ledger **notified**, and a notification can be a long time coming. That produced a successful read that was never kept — `loadOlder()` brought a page into the window, the UI rendered it, it slid out before the next notification, and **the accumulator never saw it**. Pages are now folded in while they are still on screen. Stopping the paging does **not** stop the live tail — calls arriving later still show up immediately.
 
-**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.16.1 · 第 43 页 · 已读完 · 可翻页 是`.
+**The last line says which build you are running.** The Client half is served with `cache-control: immutable`, cannot be imported by a Node test, and its served bytes sit behind the Desktop capability check — so "which build is the browser running" used to be unanswerable. It is now printed in the tab: `dsh-skill-router v1.16.2 · 第 43 页 · 已读完 · 可翻页 是`.
 
 **The Chinese name is display only.** A skill name is the match key for `skill_load`, for index search and for the `/skill` command, so:
 
@@ -746,7 +746,7 @@ The plugin now ships **no `node_modules` and no dependencies**, and builds its t
 npm test
 ```
 
-Thirty dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
+Thirty-two dependency-free scripts. They run against a real staged library when one is reachable and otherwise **generate a fixture** in the OS temp directory, so a bare clone can test the plugin:
 
 | Script | Covers |
 |---|---|
@@ -766,8 +766,10 @@ Thirty dependency-free scripts. They run against a real staged library when one 
 | `redos-guard.mjs` | the `js/polynomial-redos` guard: the replacement is equivalent to the regex it replaced **case by case** (including backslash-terminated Windows paths — the first version of it stripped only `/` and differed on 8 of 20), worst-case input stays constant-time, the call sites really go through the function instead of writing the regex back, and `host.js` may contain **exactly one** "quantifier + `$`" regex, because each additional one needs its own boundedness argument |
 | `engine-range.mjs` | the `dsh.engines.dsh` range: every OR branch carries a prerelease tag (node-semver's rule — without one a tuple's rc is silently excluded), 0.1.5/0.1.6/0.1.7 are covered, 0.2 is excluded; and where a real semver is available it admits all 11 published versions, rejects 0.2.0, and confirms **the installed harness version falls inside the range** |
 | `discovery-report.mjs` | the **experiment readout** (`node tools/discovery-report.mjs`): summarises telemetry **by randomised session arm** (treatment vs control, never "injected vs not", which would be different task populations) with the primary metric over **each session's first HIGH** (the only observation that provably precedes any hint) and printing each arm's n, yes/no counts and a **Wilson 95% interval** (a bare proportion hides how small n is), printing the **raw 2x2 table** for the final analysis (a p-value only under `--fisher`, never by default), and keeping **"unknown" strictly apart from "zero"** — per-turn counting is right-truncated by design (a turn settles at the next turn), so an unpaired turn must report unknown rather than search=0, or a rising search rate reads as no change; the pairing key is **`(sessionKey, turn)`**, not `turn` (measured: 14 turn numbers duplicated across sessions), deduped per turn for real (several discovery records collapse to the last, several counting records are summed, or one turn counts twice in numerator and denominator); records without a session label are counted separately; malformed lines are not swallowed; multiple `indexRows` values raise a warning (the corpus changed); token text is never printed by default |
+| `phase2-control.mjs` | the **pure control logic** for the Phase-2 arms: arm parsing (an unset variable keeps the old randomised behaviour, an **invalid value fails closed instead of falling back to randomisation**), the manually selected list (the negative control's empty array is legal, dedupe preserves order, malformed JSON / non-string entries / unsafe skill names are refused, and an over-limit list **errors rather than silently truncating**), and the `<skill_content source="library">` body envelope (refusing non-library sources, unsafe names, empty bodies and truncated bodies) |
 | `discovery-ranking.mjs` | the **candidate-generator quality guard**: corpus-frequency filtering (a word carried by every row cannot score, `corpusFrequency` reports the ratio, the 80% boundary keeps and >80% drops, and an all-common task reports `no-discriminating-token`), dedupe by skill name (one slot per name, best-scoring copy kept), **tier computed over the deduped effective tokens** (a 100%-frequency word cannot forge HIGH), and genuine strong candidates still reaching HIGH; against a real library it samples that `skill`/`skills` really are 100% words, that a security-audit task ranks `semgrep` first, that a code-review task ranks `code-review` first, and that no candidate list repeats a name |
 | `discovery-injection.mjs` | the discovery wiring (**HIGH injection + per-turn tool counting**): injection happens only at `tier === HIGH` and `step === 1`, the injected message shape is valid (`role`/`content`/`source`/**unique `id`**), two injections differ in id, `step=2` and NONE do not inject, and the original messages are untouched; telemetry records `injected` and a **measured** `hintBytes`; tool calls are counted **per turn after the turn ends** (the three skill tools separately, the native `skill` tool separately, everything else only in aggregate), with counters reset per turn and no tool arguments or skill bodies in the record |
+| `phase2-conditions.mjs` | the **host wiring for the four arms**: a real-library fixture drives the actual `agent/pre-step` handler and asserts the observed effect per arm — A appends not a single byte, B appends only the candidate hint and **never a `<skill_content>` body**, C routes on the task text and injects the top-ranked library body (the fixture deliberately puts a *different* skill in `DSH_PHASE2_EXPECTED_SKILLS`, so C cannot be passing by reading that label), and D injects the manually selected body while its explicit empty-array negative control appends nothing; telemetry records the mechanics and skill names but **never a body** |
 | `build-index.mjs` | the index generator: **every row resolves to an existing `SKILL.md` by the plugin's own path rule** (the first version added an extra `repo/` level, so 1,028 rows matched 1,028 while zero resolved — counting cannot catch that), `.git`/`node_modules` skipped, BOM/CRLF/block scalars/missing name/missing description, TSV escaping for tabs and quotes, `whenToUse` written only when needed, and the CLI's three `--check` states including CRLF not counting as drift; against a real library it re-checks every row and compares key sets with the existing index |
 | `doctor.mjs` | every assertion of the library check-up **constructs a real failure and requires it to be reported** (missing index / stale / missing rows / no description / cross-repo duplicates), because a check-up that always says "healthy" would pass a test that only feeds it healthy libraries; `--json` parses and carries no full-library detail |
 | `library-root-contract.mjs` | the **cross-layer contract**: one fixture drives both the runtime (`host.js`) and `doctor.mjs`, asserting they resolve the **same library root** from the same nested cwd, plus both divergence points (past 8 levels neither should find it; on an empty workspace only the runtime falls back to the starter library) |
@@ -794,7 +796,7 @@ host.js                       the plugin: apply(), buildSkillRouterTools(), defi
 client.js                     the Client half: registers the 技能/Skills tab in conversation.view
 cordis.patch.yml              the composed row (id: skill-router, name: dsh-skill-router)
 SECURITY.md / SECURITY.zh.md  security policy (English / Chinese)
-test/                         thirty runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
+test/                         thirty-two runs, plus a dev-only stand-in for @deepseek-ai/dsh-tools
 tools/audit-library-risk.mjs  library risk audit (the policy's figures come from it)
 tools/audit-client-halves.mjs packaging-contract diagnostic for this machine's Client halves
 docs/                         per-version release notes (bilingual, Chinese first)

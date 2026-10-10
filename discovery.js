@@ -142,6 +142,50 @@ export function discoveryRecord(input) {
     // They are not the raw task text, but they are not harmless either: a keyword can be a project
     // name, a customer name, a vulnerability id. Off by default; `undefined` rather than `[]` when
     // off, so a reader can tell "not recorded" from "recorded and empty".
+    // Keep the legacy discovery-record shape byte-for-byte compatible unless a phase-2 arm
+    // explicitly supplies the opt-in audit discriminator. This avoids rewriting normal telemetry.
+    ...(source.phase2Mode === undefined ? {} : {
+      phase2Mode: ['A', 'B', 'C', 'D', 'legacy', 'invalid'].includes(String(source.phase2Mode)) ? String(source.phase2Mode) : null,
+      injectionStatus: String(source.injectionStatus ?? 'unknown').slice(0, 80),
+      loadFailure: String(source.loadFailure ?? '').slice(0, 80),
+      requestedSkills: (Array.isArray(source.requestedSkills) ? source.requestedSkills : []).slice(0, 3).map((name) => String(name ?? '').slice(0, 128)),
+      selectedSkills: (Array.isArray(source.selectedSkills) ? source.selectedSkills : []).slice(0, 3).map((skill) => ({
+        name: String(skill?.name ?? '').slice(0, 128),
+        source: skill?.source === 'library' ? 'library' : 'unknown',
+        repo: String(skill?.repo ?? '').slice(0, 160),
+        // Body size, so C and D can be compared on body identity rather than on the name alone.
+        // A differing byte count is what exposes "same name, different copy".
+        ...(typeof skill?.contentBytes === 'number' && Number.isFinite(skill.contentBytes)
+          ? { contentBytes: Math.max(0, Math.round(skill.contentBytes)) }
+          : {}),
+      })),
+      injectedSkills: (Array.isArray(source.injectedSkills) ? source.injectedSkills : []).slice(0, 3).map((skill) => ({
+        name: String(skill?.name ?? '').slice(0, 128),
+        source: skill?.source === 'library' ? 'library' : 'unknown',
+        repo: String(skill?.repo ?? '').slice(0, 160),
+        ...(typeof skill?.contentBytes === 'number' && Number.isFinite(skill.contentBytes)
+          ? { contentBytes: Math.max(0, Math.round(skill.contentBytes)) }
+          : {}),
+      })),
+      // Arm-D identity evidence. `requestedSkillRepos` is what the MANIFEST declared (name + repo),
+      // which is the only way to tell whether a same-named body came from the declared copy.
+      // `repoMismatchDetail` only ever appears when D deliberately failed closed.
+      requestedSkillRepos: (Array.isArray(source.requestedSkillRepos) ? source.requestedSkillRepos : []).slice(0, 3).map((entry) => ({
+        name: String(entry?.name ?? '').slice(0, 128),
+        repo: String(entry?.repo ?? '').slice(0, 160),
+      })),
+      ...(source.repoMismatchDetail === null || source.repoMismatchDetail === undefined ? {} : {
+        repoMismatchDetail: {
+          requested: String(source.repoMismatchDetail?.requested ?? '').slice(0, 128),
+          declaredRepo: String(source.repoMismatchDetail?.declaredRepo ?? '').slice(0, 160),
+          resolvedRepo: String(source.repoMismatchDetail?.resolvedRepo ?? '').slice(0, 160),
+          resolvedBy: String(source.repoMismatchDetail?.resolvedBy ?? '').slice(0, 160),
+        },
+      }),
+      messageAppended: source.messageAppended === true,
+      payloadType: ['none', 'candidate-hint', 'skill-body'].includes(String(source.payloadType)) ? String(source.payloadType) : 'none',
+      payloadBytes: typeof source.payloadBytes === 'number' && Number.isFinite(source.payloadBytes) ? Math.max(0, Math.round(source.payloadBytes)) : 0,
+    }),
     tokensUsed: Array.isArray(source.tokensUsed) ? source.tokensUsed.map((t) => String(t)) : undefined,
   }
 }

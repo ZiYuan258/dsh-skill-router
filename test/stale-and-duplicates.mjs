@@ -74,8 +74,10 @@ if (loose.fallback === 'or') {
 const empty = await search.execute({ query: 'the a of' }, exec)
 check('a query of stop words alone still answers', empty.error !== undefined || empty.hits.length === 0, JSON.stringify(empty.error))
 
+// 2026-10-05 起 tokenizer 保留 CJK，中文查询产出真实 token 并正常搜索，不再报 "keywords must
+// be English"。这条曾把"中文被整体丢弃"当成设计来断言——那是个 bug。
 const cjk = await search.execute({ query: '做视频' }, exec)
-check('a non-Latin query explains that keywords must be English', /English/i.test(String(cjk.error)), String(cjk.error).slice(0, 90))
+check('a Chinese query now tokenizes and searches (no "must be English" error)', /English/i.test(String(cjk.error)) === false, JSON.stringify({ error: cjk.error, total: cjk.total }).slice(0, 90))
 
 // --- a Chinese query that leaves a single ASCII letter behind ------------------
 //
@@ -85,12 +87,13 @@ check('a non-Latin query explains that keywords must be English', /English/i.tes
 // reported a full result set for a query whose keywords were entirely absent — worse than
 // reporting nothing, because a model that sees hits has no reason to reword.
 //
-// A Chinese query must land in the same branch as `做视频`, and a query of one stop word must
-// keep the old fallback behaviour (asserted just above).
+// 2026-10-05 起 CJK 进入保留集，`C盘清理` 是一个完整 token（C 不再被孤立成 `c`），那个
+// "假成功"路径已不存在。A Chinese query now searches with real tokens; a stop-word-only query
+// still keeps the old fallback behaviour (asserted just above).
 const cjkWithLetter = await search.execute({ query: 'C盘清理 系统盘治理 磁盘空间' }, exec)
 check(
-  'a Chinese query that leaves one ASCII letter behind still reports no keyword',
-  /no searchable keyword|English/i.test(String(cjkWithLetter.error)),
+  'a Chinese query with a leading ASCII letter now searches (no "no keyword" fallback)',
+  /no searchable keyword|English/i.test(String(cjkWithLetter.error)) === false,
   `error=${String(cjkWithLetter.error).slice(0, 60)} total=${cjkWithLetter.total}`,
 )
 check(

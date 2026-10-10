@@ -108,9 +108,10 @@ const loaded = await call('skill_load', { name: 'debug-with-evidence' }, emptyWo
 ok('能真正加载入门技能的正文', loaded.loaded === 'debug-with-evidence' && String(loaded.skills[0].content).includes('Debug with evidence'), JSON.stringify(loaded.loaded))
 ok('加载返回的 source 是 library（不是常驻目录）', loaded.skills[0].source === 'library', String(loaded.skills[0].source))
 
-// 中文查询在入门库上同样给出"没有可搜索关键词"，而不是假装没找到
+// 2026-10-05 起 tokenizer 保留 CJK，中文查询产出真实 token 并正常搜索（入门库是英文名，
+// 中文 token 命中 0 条，但那是"没找到"不是"没关键词"——不再报 'Latin script'）。
 const zh = await call('skill_search', { query: '帮我调试' }, emptyWorkspace)
-ok('中文查询仍明确说明需要英文关键词', String(zh.error).includes('Latin script'), String(zh.error).slice(0, 50))
+ok('中文查询现在正常搜索（不再报需要英文关键词）', String(zh.error).includes('Latin script') === false, JSON.stringify({ error: zh.error, total: zh.total }).slice(0, 60))
 
 // 有自己的库时，标记必须消失（否则用户会以为自己的库没被读到）。
 // 本机没有真库时**跳过**，不拿插件的 resources/ 去伪造——那个目录里没有 .skill-src，

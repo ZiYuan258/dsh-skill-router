@@ -347,7 +347,11 @@ function tokenize(query) {
   const tokens = []
   const normalized = String(query ?? '')
     .toLowerCase()
-    .replace(/[^a-z0-9+#._-]+/g, ' ')
+    // 2026-10-05：保留集加入 CJK（窄口径：Ext-A \u3400-\u4dbf + 统一表意 \u4e00-\u9fff
+    // + 兼容表意 \uf900-\ufaff，见 .dsh/SKILLS-POLICY.md §27）。之前 CJK 被整体丢弃：
+    // tokenize('插件装不上') = []，中文查询在检索层全灭。现在 CJK 连续段作为一个 token 保留；
+    // 中文多词查询要用空格分词（中文无词边界，regex 切不出词）。
+    .replace(/[^a-z0-9+#._-\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+/g, ' ')
   for (const token of normalized.split(' ')) {
     if (token === '' || tokens.includes(token)) continue
     if (tokens.length >= 12) break
@@ -377,8 +381,8 @@ function tokenize(query) {
   //
   // 判据：回退放行的前提是 token 里**至少有一个长度 ≥ 2 的**（`the` 算，`c` 不算）。
   // 长度 1 的拉丁字母在 7,700 行语料里没有任何区分力 —— 它不是词，是汉字段落里的残留。
-  // 这样中文查询回到它应有的回答（no searchable keyword），而纯停用词查询（`the a of`）
-  // 的返回值**逐字不变**（仍然回退到未过滤的 tokens），非退化路径完全不受影响。
+  // 2026-10-05 起 CJK 进入保留集，纯中文查询产出真实 token（如 '插件装不上'），此守卫只剩
+  // 混合查询里的拉丁残留场景；纯停用词查询（`the a of`）仍逐字不变（回退到未过滤 tokens）。
   const fallback = tokens.filter((token) => token.length > 1)
   return fallback.length > 0 ? tokens : []
 }
@@ -2044,7 +2048,35 @@ export function buildSkillRouterTools(ctx, register) {
     return { ...result, indexRows: loaded.rows.length, bundled: loaded.bundled === true }
   }
 
-  return { searchTool, loadTool, refTool, discover }
+  /** Load a body only when the caller explicitly needs the phase-2 body-injection treatment. */
+  async function loadForInjection(name, repo, cwd, signal, agent) {
+    let loaded
+    try {
+      loaded = await loadIndex(cwd, signal)
+    } catch {
+      return { eligible: false, reason: 'index-error', skill: { name: String(name ?? ''), source: '', content: '' } }
+    }
+    // The bundled starter index follows the same source='library' tool path. It is not the
+    // participant's .skill-src and must never enter the phase-2 primary treatment.
+    if (loaded.bundled === true) {
+      return { eligible: false, reason: 'starter-library-excluded', skill: { name: String(name ?? ''), source: 'library', content: '' } }
+    }
+    if (loaded.root === '') {
+      return { eligible: false, reason: 'no-user-library', skill: { name: String(name ?? ''), source: '', content: '' } }
+    }
+    let skill
+    try {
+      skill = await loadSkill(name, repo, cwd, signal, { agent, signal })
+    } catch {
+      return { eligible: false, reason: 'load-error', skill: { name: String(name ?? ''), source: '', content: '' } }
+    }
+    if (!isSafeName(String(skill.name ?? ''))) return { eligible: false, reason: 'unsafe-name', skill }
+    if (skill.source !== 'library') return { eligible: false, reason: 'source-not-library', skill }
+    if (typeof skill.content !== 'string' || skill.content.trim() === '') return { eligible: false, reason: 'empty-content', skill }
+    if (skill.truncated === true) return { eligible: false, reason: 'truncated-content', skill }
+    return { eligible: true, reason: '', skill }
+  }
+  return { searchTool, loadTool, refTool, discover, loadForInjection }
 }
 
 // Zero dependencies, and that has to stay true of the discovery side as well: `discovery.js`
@@ -2055,6 +2087,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { dirname as dirnamePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defaultDiscoveryLogPath, discoveryRecord, makeDiscoveryRecorder, turnCallsRecord } from './discovery.js'
+import { formatSkillContentText, parseManualSkillNames, parsePhase2Arm } from './phase2-control.js'
 
 /**
  * Durable DSH plugin entry: registers all three tools on the global tool registry.
@@ -2295,7 +2328,11 @@ export function apply(ctx, config) {
   // The cost is why it is worth trying at all: the resident catalog costs ~3,238 tokens per turn
   // and the three tool schemas ~1,001, while a five-name hint measures 329–341 bytes (~91–95 tokens)
   // on the real library. An earlier note said ~57; that came from short sample names and was wrong.
-  const INJECT_TIERS = new Set(['HIGH'])
+  // 2026-10-05：HIGH-tier 注入默认关停。实测 45 个 treatment 回合 0 次自发使用（唯一 1 次是
+  // 用户指定重放），对照组 181 回合 12 次——见 .dsh/SKILLS-POLICY.md §25/§26。设计假设
+  // "the agent is never told which ones are worth considering" 已被直接测试并证伪。
+  // 重新启用：设环境变量 DSH_SKILL_ROUTER_INJECT_TIERS=HIGH。
+  const INJECT_TIERS = new Set(process.env.DSH_SKILL_ROUTER_INJECT_TIERS === 'HIGH' ? ['HIGH'] : [])
 
   /**
    * Whether this session has already had its first eligible opportunity.
@@ -2423,16 +2460,183 @@ export function apply(ctx, config) {
         // `experimentArmOf` for why per-turn arms were wrong), and only the arm decides whether the
         // hint goes out — so both arms are the same kind of task by construction, which is what the
         // earlier HIGH-vs-everything-else comparison lacked.
-        const eligible = INJECT_TIERS.has(String(result.tier)) && result.candidates.length > 0
-        const arm = eligible ? experimentArmOf(sessionKey) : 'not-eligible'
-        // The session's FIRST eligible opportunity is the primary experimental unit: it is the only
-        // observation that provably precedes any hint this experiment could have shown, so nothing
-        // durable can have leaked into it. Later ones are recorded (and reported separately) but they
-        // are not independent samples once the agent has searched and learned something.
+        const phase2 = parsePhase2Arm(process.env.DSH_PHASE2_ARM)
+        const high = INJECT_TIERS.has(String(result.tier)) && Array.isArray(result.candidates) && result.candidates.length > 0
+        // The legacy experiment keeps its original eligibility. Trial arms require the user's own
+        // library; bundled fallback is a recorded miss and cannot be counted as a treatment.
+        const eligible = phase2.mode === 'legacy'
+          ? high
+          : phase2.mode !== 'invalid' && high && result.bundled !== true
         const firstEligible = eligible && firstEligibleSeen.has(sessionKey) === false
         if (eligible) firstEligibleSeen.add(sessionKey)
-        const inject = eligible && arm === 'treatment'
-        const hint = inject ? discoveryHint(result) : ''
+
+        let arm = 'not-eligible'
+        let payload = ''
+        let payloadType = 'none'
+        let injectionStatus = 'not-eligible'
+        let loadFailure = ''
+        let selectedSkills = []
+        let requestedSkills = []
+        let injectedSkills = []
+        // The declared (name, repo) pairs for arm D, and the detail when a declared repo did not
+        // resolve. Both go into the telemetry record so the comparison of C vs D can check the skill
+        // NAME, the ACTUAL repo, and the body identity — not just the name.
+        let requestedSkillRepos = []
+        let repoMismatchDetail = null
+
+        if (phase2.mode === 'invalid') {
+          arm = 'invalid'
+          injectionStatus = 'invalid-arm'
+        } else if (phase2.mode === 'A') {
+          arm = 'A'
+          injectionStatus = 'baseline-no-injection'
+        } else if (phase2.mode === 'B') {
+          arm = 'B'
+          if (result.bundled === true) {
+            injectionStatus = 'bundled-library-excluded'
+            loadFailure = 'starter-library-excluded'
+          } else if (result.reason === 'no-library') {
+            injectionStatus = 'no-user-library'
+          } else if (high) {
+            payload = discoveryHint(result)
+            payloadType = 'candidate-hint'
+            injectionStatus = 'hint-injected'
+          } else {
+            injectionStatus = 'no-high-candidate'
+          }
+        } else if (phase2.mode === 'C') {
+          arm = 'C'
+          if (result.bundled === true) {
+            injectionStatus = 'bundled-library-excluded'
+            loadFailure = 'starter-library-excluded'
+          } else if (!high) {
+            injectionStatus = result.reason === 'no-library' ? 'no-user-library' : 'no-high-candidate'
+          } else {
+            // Search results may combine library rows with resident/catalog rows. Try the ranked
+            // candidates, but only accept one that loadSkill resolves from the participant's real
+            // .skill-src. A resident-only top result must not turn into a false negative if a valid
+            // library candidate is next in the ranking.
+            const candidates = result.candidates
+              .filter((candidate) => isSafeName(String(candidate?.name ?? '')))
+              .slice(0, MAX_LISTED)
+            let chosen = null
+            let lastFailure = candidates.length === 0 ? 'no-safe-library-candidate' : ''
+            for (const candidate of candidates) {
+              const loadedSkill = await router.loadForInjection(candidate.name, candidate.repo, cwd, signal, agent)
+              if (loadedSkill.eligible) {
+                chosen = { candidate, skill: loadedSkill.skill }
+                break
+              }
+              lastFailure = loadedSkill.reason
+            }
+            if (chosen === null) {
+              loadFailure = lastFailure
+              injectionStatus = 'library-load-failed'
+            } else {
+              try {
+                payload = formatSkillContentText(chosen.skill)
+                payloadType = 'skill-body'
+                selectedSkills = [{ name: String(chosen.skill.name), source: 'library', repo: String(chosen.skill.repo ?? '') }]
+                injectedSkills = [{ name: String(chosen.skill.name), source: 'library', repo: String(chosen.skill.repo ?? '') }]
+                injectionStatus = 'body-injected'
+              } catch {
+                payload = ''
+                payloadType = 'none'
+                loadFailure = 'invalid-skill-content'
+                injectionStatus = 'library-load-failed'
+              }
+            }
+          }
+        } else if (phase2.mode === 'D') {
+          arm = 'D'
+          const manual = parseManualSkillNames(process.env.DSH_PHASE2_MANUAL_INJECT_SKILLS)
+          if (!manual.valid) {
+            injectionStatus = manual.reason === 'missing-manual-list' ? 'missing-manual-list' : 'invalid-manual-list'
+            loadFailure = manual.reason
+          } else if (manual.names.length === 0) {
+            injectionStatus = 'manual-empty'
+          } else {
+            requestedSkills = manual.names.slice()
+            // Declared repo per requested name, for the audit record (the ruling requires recording
+            // the DECLARED repo alongside the ACTUALLY resolved one).
+            const declared = Array.isArray(manual.skills) ? manual.skills : manual.names.map((name) => ({ name, repo: '' }))
+            requestedSkillRepos = declared.map((s) => ({ name: String(s.name), repo: String(s.repo ?? '') }))
+            const loadedSkills = []
+            for (const entry of declared) {
+              const name = String(entry.name)
+              const repoHint = String(entry.repo ?? '')
+              // A declared repo is a PRECISE identity constraint, not a hint. If the named skill
+              // cannot be resolved inside that repo, D must fail closed: silently falling back to a
+              // same-named copy in another repo would mean arm D injects a body the sample never
+              // declared, which destroys the oracle. Several expected skills do exist in five
+              // copies with different bodies (systematic-debugging, writing-plans).
+              const loadedSkill = await router.loadForInjection(name, repoHint, cwd, signal, agent)
+              if (!loadedSkill.eligible) {
+                loadFailure = loadedSkill.reason
+                // A declared repo that resolves nothing is usually a repo-filter miss: loadSkill
+                // (host.js:1509-1515) reports `source-not-library` when the index knows the name but
+                // not under the requested repo. That reason is accurate but does not say WHICH
+                // constraint failed, and the ruling requires the declared repo to be recoverable from
+                // telemetry. Record the identity evidence without relabelling the failure.
+                if (repoHint !== '') {
+                  repoMismatchDetail = { requested: name, declaredRepo: repoHint, resolvedRepo: '', failure: String(loadedSkill.reason ?? '') }
+                }
+                break
+              }
+              if (repoHint !== '') {
+                const actualRepo = String(loadedSkill.skill.repo ?? '')
+                // An EMPTY actualRepo is itself the tell that resolution fell through to
+                // scanForSkill (host.js:1260 returns `repo: ''`), i.e. the directory walk answered
+                // and the declared repo was never consulted. Treat that as a mismatch, not as a pass.
+                if (actualRepo === '' || actualRepo.toLowerCase().indexOf(repoHint.toLowerCase()) < 0) {
+                  loadFailure = 'repo-mismatch'
+                  repoMismatchDetail = {
+                    requested: name,
+                    declaredRepo: repoHint,
+                    resolvedRepo: actualRepo,
+                    // Distinguish the two shapes for the auditor: the index resolved a DIFFERENT repo
+                    // vs the index had no row and a directory scan answered with no repo at all.
+                    resolvedBy: actualRepo === '' ? 'directory-scan (no repo from scanForSkill)' : 'index'
+                  }
+                  break
+                }
+              }
+              loadedSkills.push(loadedSkill.skill)
+            }
+            // D is all-or-none: partially injecting an oracle set would make the treatment ambiguous.
+            if (loadFailure !== '') {
+              injectionStatus = 'manual-load-failed'
+            } else {
+              try {
+                payload = loadedSkills.map(formatSkillContentText).join('\n\n')
+                payloadType = 'skill-body'
+                selectedSkills = loadedSkills.map((skill) => ({ name: String(skill.name), source: 'library', repo: String(skill.repo ?? ''), contentBytes: Buffer.byteLength(String(skill.content ?? ''), 'utf8') }))
+                injectedSkills = loadedSkills.map((skill) => ({ name: String(skill.name), source: 'library', repo: String(skill.repo ?? ''), contentBytes: Buffer.byteLength(String(skill.content ?? ''), 'utf8') }))
+                injectionStatus = 'body-injected'
+              } catch {
+                payload = ''
+                payloadType = 'none'
+                injectedSkills = []
+                loadFailure = 'invalid-skill-content'
+                injectionStatus = 'manual-load-failed'
+              }
+            }
+          }
+        } else {
+          // No phase-2 assignment: preserve the pre-existing randomized hint experiment exactly.
+          arm = eligible ? experimentArmOf(sessionKey) : 'not-eligible'
+          if (eligible && arm === 'treatment') {
+            payload = discoveryHint(result)
+            payloadType = 'candidate-hint'
+            injectionStatus = 'legacy-hint-injected'
+          } else {
+            injectionStatus = eligible ? 'legacy-control' : 'legacy-no-high-candidate'
+          }
+        }
+
+        const inject = payload !== ''
+        const payloadBytes = Buffer.byteLength(payload, 'utf8')
+        const hintBytes = payloadType === 'candidate-hint' ? payloadBytes : 0
         perSession.set(sessionKey, { turn: typeof turn === 'number' ? turn : null, tier: String(result.tier), injected: inject, arm, calls: {}, other: 0 })
         recorder.write(
           discoveryRecord({
@@ -2443,19 +2647,30 @@ export function apply(ctx, config) {
             indexRows: result.indexRows,
             injected: inject,
             firstEligible,
-            // `arm` is the assignment, `injected` is what actually happened. Kept as two fields so a
-            // control turn that somehow carried a hint would be visible rather than invisible.
             arm,
-            // Measured, not estimated: the case for injecting rests on this number being small.
-            hintBytes: Buffer.byteLength(hint, 'utf8'),
+            hintBytes,
+            phase2Mode: phase2.mode === 'legacy' ? undefined : phase2.mode,
+            injectionStatus,
+            loadFailure,
+            selectedSkills,
+            requestedSkills,
+            injectedSkills,
+            // Arm-D identity evidence: what the manifest declared vs what actually resolved. A
+            // missing repo here is itself informative (the legacy bare-name form), and
+            // repoMismatchDetail only ever appears when D failed closed on purpose.
+            requestedSkillRepos,
+            repoMismatchDetail,
+            messageAppended: inject,
+            payloadType,
+            payloadBytes,
             tokensUsed: debugTokens ? result.effectiveTokens : undefined,
             debugTokens,
             sessionKey,
             sessionCreatedAt,
           }),
         )
-        // Appended to this step's claimed batch — not injected into the inbox.
-        return inject ? { ...decision, messages: [...decision.messages, contextMessage(hint)] } : decision
+        // Message is appended to the current step's decision.messages, not queued for a later step.
+        return inject ? { ...decision, messages: [...decision.messages, contextMessage(payload)] } : decision
       } catch (error) {
         // Telemetry is never worth a failed turn — but a silent catch is how a run produces
         // "three days, no data" and nothing to look at. Keep the failure observable in-process

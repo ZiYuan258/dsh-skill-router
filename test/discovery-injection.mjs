@@ -3,7 +3,9 @@
 // 这个文件经历了三个版本，值得记下演变的原因，因为它记录的正是这个仓库最警惕的那类错误：
 //
 //   v1（干跑） 断言"决策不被改变"—— 当时那是硬约束，因为什么都不注入。
-//   v2（本版） 断言"HIGH 注入、其余不注入"—— 决策**必须**被改变，且只在 HIGH 时。
+//   v2 断言"HIGH 注入、其余不注入"—— 决策**必须**被改变，且只在 HIGH 时。
+//   v3（本版） 注入层默认关停（INJECT_TIERS env-gated，见 host.js）。本测试在文件顶部把
+//           DSH_SKILL_ROUTER_INJECT_TIERS=HIGH 设上，以继续验证接线；真机默认不注入。
 //
 // 上一版那两条断言（"干跑不改变决策"、"injected: false"）现在会红，而且**应该红**：行为按设计
 // 变了。一个不会因为行为改变而变红的测试，等于没有在测行为。
@@ -41,6 +43,8 @@ writeFileSync(
 )
 const logPath = join(workspace, 'discovery.jsonl')
 process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG = logPath
+// v3：注入层默认关停；这里显式打开以测接线（每个测试文件是独立 node 进程，不污染其它测试）。
+process.env.DSH_SKILL_ROUTER_INJECT_TIERS = 'HIGH'
 const mod = await import('../host.js')
 const { experimentArmOf } = mod
 

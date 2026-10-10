@@ -33,6 +33,8 @@ const ALLOWED = [
   /^C:\/$/i, // test/verify.mjs 拿文件系统根当"走到顶也没有库"的测试点
   /^Q:\/lib(\/|$)/i, // test/skill-ref.mjs 的 resolvePath 夹具（Q: 是不存在的盘符）
   /^Q:\/etc(\/|$)/i, // 同上，`..` 逃逸用例的期望值
+  /^X:\/skills(\/|$)/i, // test/phase2-control.mjs 与 test/phase2-conditions.mjs 的信封夹具（X: 是不存在的盘符，只为断言正文里的 resourceDir 被原样写出）
+  /^C:\/x$/i, // 同上两个文件的 arm-D repo 拒绝用例：`C:\x` 是**必须被拒绝**的盘符形状样本，不是真实路径
 ]
 
 // 比对前把反向斜杠归一成 `/`，并把连续斜杠压成一个：JS 源码里的 `Q:\\lib\\…` 在
