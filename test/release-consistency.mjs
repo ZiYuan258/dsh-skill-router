@@ -52,14 +52,14 @@ ok('README 里的版本示例与代码一致（' + versionExamples.length + ' �
 // 互相一致（都是 24），所以 docs-parity 一条都不会红。要抓住它，必须拿**第三方真相**（脚本链
 // 本身）去比对文档，而不是两个文档互比。
 const scripts = JSON.parse(read('package.json')).scripts.test
-const chain = [...scripts.matchAll(/test[/\\]([\w-]+\.mjs)/g)].map((m) => m[1])
+const chain = [...scripts.matchAll(/(?:test|experimental[/\\]phase2)[/\\]([\w.-]+\.mjs)/g)].map((m) => m[1])
 ok('测试链里解析出脚本名（' + chain.length + ' 个）', chain.length > 0)
 const duplicated = chain.filter((name, i) => chain.indexOf(name) !== i)
 ok('测试链里没有重复脚本', duplicated.length === 0, duplicated.join(', '))
 
 for (const file of ['README.md', 'README.en.md']) {
   const text = read(file)
-  const table = [...text.matchAll(/^\| `([\w-]+\.mjs)` \|/gm)].map((m) => m[1])
+  const table = [...text.matchAll(/^\| `([\w.-]+\.mjs)` \|/gm)].map((m) => m[1])
   const undocumented = chain.filter((name) => table.includes(name) === false)
   const dangling = table.filter((name) => chain.includes(name) === false)
   ok(file + ' 的测试表覆盖了全部 ' + chain.length + ' 个脚本', undocumented.length === 0, '缺: ' + undocumented.join(', '))

@@ -410,7 +410,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.17.3 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.18.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 > **v1.17.1 起：搜索结果也入列；v1.17.2 起：查询兜底；v1.17.3 起：run_code 内嵌调用。** 一次成功的 `skill_search` 以前在这个标签页里不可见——搜索是"找"不是"用"，不计入加载计数。v1.17.1 让标签页显示搜索*找到*了哪些技能（从 `tool/result` 事件的 hits 解析，标 `skill_search` 以区别于 `skill_load`）。但 `eventSource` 窗口实际只含 `tool/call` 不含 `tool/result`（dsh-better-sidebar 的 `changes.ops` 路由正是为此而建），所以 v1.17.1 在生产里仍看不到。v1.17.3 加了第三遍：对结果不在窗口里的搜索，显示查询本身（前缀 🔍），让"搜过"这件事至少看得见。v1.17.3 发现根因：agent 用 `run_code` 作唯一工具接口，`skill_search`/`skill_load` 调用嵌在 TypeScript 代码体里，不是独立的 `tool/call` 事件——前三遍全找不到。v1.17.3 在第一遍里解析 `run_code` 的 `code` 参数，用正则提取内嵌的 `tools.skill_search({query:…})` 和 `tools.skill_load({name:…})`，让它们也入列。搜索本身仍不算一次加载调用。
@@ -460,7 +460,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.17.3 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.18.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -763,7 +763,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-三十三个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+三十三个零依赖脚本（`test/` 下三十一个 + `experimental/phase2/` 下两个归档实验）。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -784,10 +784,10 @@ npm test
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
 | `discovery-report.mjs` | **实验读数脚本**（`node tools/discovery-report.mjs`）：按**随机分臂**汇总实验（treatment vs control，而不是"注入 vs 未注入"——后者是不同任务总体），主指标只算**每会话第一个 HIGH**（唯一可证明先于任何提示的观测），并，并且**把"未知"与"0 次"严格分开**——按回合的计数天生右截断（回合结束才在下一回合落盘），未配对的回合必须报成 unknown 而不是 search=0，否则上升的搜索率会被算成没变化；配对键是 **`(sessionKey, turn)`** 而不是 `turn`（实测 14 个 turn 号跨会话重复），且按回合**真正去重**（多条发现记录取最后一条、多条计数记录逐项求和，否则同一回合会在分子分母里各算两次）；无会话标签的旧记录单独计数；坏行不吞掉；`indexRows` 出现多个取值时报警（语料换过）；token 文本默认不打印 |
-| `phase2-control.mjs` | Phase-2 四组的**纯控制逻辑**：组别解析（未设变量保留旧的随机行为、**非法值 fail-closed 而不是回退到随机组**）、人工指定技能列表（负对照的空数组合法、去重不换序、坏 JSON / 非字符串项 / 不安全技能名被拒、超限**报错而不静默截断**）、`<skill_content source="library">` 正文信封（拒绝非库来源、不安全名、空正文、被截断的正文） |
+| `phase2-control.test.mjs` | Phase-2 四组的**纯控制逻辑**（归档至 `experimental/phase2/`）：组别解析（未设变量保留旧的随机行为、**非法值 fail-closed 而不是回退到随机组**）、人工指定技能列表（负对照的空数组合法、去重不换序、坏 JSON / 非字符串项 / 不安全技能名被拒、超限**报错而不静默截断**）、`<skill_content source="library">` 正文信封（拒绝非库来源、不安全名、空正文、被截断的正文） |
 | `discovery-ranking.mjs` | **候选生成器的质量护栏**：语料频率过滤（全库都有的词不得参与评分、`corpusFrequency` 如实报道比例、阈值边界 80% 保留 / >80% 丢弃、全部无判别力时给 `no-discriminating-token`）、按技能名去重（同名只占一个名额、保留最高分）、**tier 在去重后的有效 token 上计算**（100% 词不能伪造 HIGH）、真正的强候选仍是 HIGH；有真库时抽样验证 `skill`/`skills` 确为 100% 词、且安全审计任务把 `semgrep` 排第一、代码审查任务把 `code-review` 类排前、候选名不重复 |
 | `discovery-injection.mjs` | 发现层的接线（**HIGH 注入 + 每回合工具计数**）：注入只发生在 `tier === HIGH` 且 `step === 1`、注入消息形状合法（`role`/`content`/`source`/**唯一 `id`**）、两次注入 id 不同、`step=2` 与 NONE 不注入、原文消息未被改动；遥测如实记 `injected` 与**实测** `hintBytes`；工具调用**在回合结束后**按回合计数（三个技能工具各记、原生 `skill` 单独记、其它工具只汇总），且计数按回合归零、记录里没有工具参数与正文 |
-| `phase2-conditions.mjs` | **四组条件的宿主接线**：用真库夹具驱动真实的 `agent/pre-step` 处理器，逐组断言实际效果——A 一个字节都不追加、B 只追加候选提示且**永不含 `<skill_content>` 正文**、C 按任务文本路由并注入排名第一的库技能正文（夹具故意把 `DSH_PHASE2_EXPECTED_SKILLS` 设成**另一个**技能，所以 C 不可能是靠读那个标签通过的）、D 注入人工指定的正文而其显式空数组负对照不追加任何东西；遥测记机制与技能名、**从不记正文** |
+| `phase2-conditions.test.mjs` | **四组条件的宿主接线**（归档至 `experimental/phase2/`）：用真库夹具驱动真实的 `agent/pre-step` 处理器，逐组断言实际效果——A 一个字节都不追加、B 只追加候选提示且**永不含 `<skill_content>` 正文**、C 按任务文本路由并注入排名第一的库技能正文（夹具故意把 `DSH_PHASE2_EXPECTED_SKILLS` 设成**另一个**技能，所以 C 不可能是靠读那个标签通过的）、D 注入人工指定的正文而其显式空数组负对照不追加任何东西；遥测记机制与技能名、**从不记正文** |
 | `build-index.mjs` | 索引生成器：**每一行都按插件的路径规则解析到真实存在的 `SKILL.md`**（第一版 `relpath` 多套了一层 `repo/`，行数 1028 = 1028 却 0 行可解析——计数检查抓不到这种错）、`.git`/`node_modules` 被跳过、BOM/CRLF/块标量/缺 name/缺 description 各形状、制表符与引号的 TSV 转义、`whenToUse` 只在需要时写第 7 列、CLI 的 `--check` 三态与 CRLF 不算过期；有真库时逐行复核并与现有索引比键集合 |
 | `doctor.mjs` | 库体检的**每条断言都构造一种真实故障**并要求它被报出来（索引不存在 / 过期 / 缺失 / 无 description / 跨仓库重名），因为一个永远返回"健康"的体检工具也能通过"健康库返回 OK"那种测试；`--json` 可解析且不含整库明细 |
 | `library-root-contract.mjs` | **跨层契约**：同一份夹具同时驱动运行时（`host.js`）与 `doctor.mjs`，断言两者从同一个嵌套 cwd 得到**同一个库根**；并覆盖两个分叉点（超过 8 层两者都不该找到；空工作区只有运行时回退入门库） |
@@ -814,7 +814,8 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         三十三个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         三十一个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+experimental/phase2/           归档的 phase-2 实验测试（两个）+ README
 tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断

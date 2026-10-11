@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { formatSkillContentText, parseManualSkillNames, parsePhase2Arm } from '../phase2-control.js';
-import { discoveryRecord } from '../discovery.js';
+import { formatSkillContentText, parseManualSkillNames, parsePhase2Arm } from '../../phase2-control.js';
+import { discoveryRecord } from '../../discovery.js';
 
 let passed = 0;
 function check(name, fn) {

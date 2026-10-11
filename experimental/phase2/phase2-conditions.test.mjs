@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { formatSkillContentText, parseManualSkillNames, parsePhase2Arm } from '../phase2-control.js';
+import { formatSkillContentText, parseManualSkillNames, parsePhase2Arm } from '../../phase2-control.js';
 
 const problems = [];
 function check(label, fn) {
@@ -80,7 +80,7 @@ const logPath = join(workspace, 'discovery.jsonl');
 process.env.DSH_SKILL_ROUTER_DISCOVERY_LOG = logPath;
 // 注入层默认关停（v1.16.2）；这里显式打开，以测 phase2 B/C 臂的注入接线。
 process.env.DSH_SKILL_ROUTER_INJECT_TIERS = 'HIGH'
-const { apply } = await import('../host.js');
+const { apply } = await import('../../host.js');
 const handlers = new Map();
 const registered = [];
 const ctx = {

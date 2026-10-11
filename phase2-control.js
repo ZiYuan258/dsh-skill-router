@@ -1,3 +1,6 @@
+// Experimental — phase-2 routing infrastructure. Gated behind DSH_PHASE2_ARM and
+// DSH_SKILL_ROUTER_INJECT_TIERS; inert by default. See DECISION.md and
+// experimental/phase2/README.md for why automatic routing is disabled.
 const PHASE2_ARMS = new Set(['A', 'B', 'C', 'D']);
 const MAX_MANUAL_SKILLS = 3;
 const SAFE_SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/;
