@@ -293,10 +293,12 @@ window.__ModuleLoader__.load({
     }
 
     // ── the ledger ──────────────────────────────────────────────────────────────
-    // Tools that actually LOAD a skill. `skill_search` is deliberately absent: searching is
-    // how a skill is found, not how it is used, and counting it made every count wrong — see
-    // contract (2) at the top of this file. These three are also exactly the tools this
-    // plugin registers, so the tab and the router agree on what "a load" means.
+    // Tools that actually LOAD a skill. `skill_search` is not here: searching is how a skill
+    // is found, not how it is used, and counting the *call* made every count wrong — see
+    // contract (2) at the top of this file. What a search *found* is shown separately: the
+    // tool/result event carries the hit names, and a second pass pairs them by callId. These
+    // three are also exactly the tools this plugin registers, so the tab and the router agree
+    // on what "a load" means.
     const LOAD_TOOLS = { skill: true, skill_load: true, skill_ref: true }
     // The router accepts at most 8 names per call; a 9th can never have been honoured.
     const MAX_NAMES = 8
@@ -389,13 +391,92 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
+    // ── skill_search result extraction ──────────────────────────────────────────
+    //
+    // The tab originally tracked only load tools (skill / skill_load / skill_ref): a search is
+    // how a skill is *found*, not how it is *used*. That contract held for the count, but it also
+    // made a successful skill_search invisible in the tab — the one event that proves the library
+    // is alive never appeared. The fix is to show what a search *found* (the hits in its result),
+    // not what it *asked for* (the query string in its call). The skill names live in the
+    // tool/result event, not the tool/call, so the call is indexed first and the result is paired
+    // by callId in a second pass.
+    //
+    // The result text is the render() output of skill_search (host.js:1418-1472): each hit is a
+    // line "- skillName  [repo]" (or "- skillName" with no repo), with the description indented
+    // on the following line. Parsing that line is stable because the format is our own render
+    // function, not an external contract.
+
+    /** The callId of a tool/result event, or '' if the shape is unrecognised. */
+    function resultCallIdOf(event) {
+      if (event === null || typeof event !== 'object') return ''
+      const data = event.data !== null && typeof event.data === 'object' ? event.data : undefined
+      if (data === undefined) return ''
+      const message = data.message !== null && typeof data.message === 'object' ? data.message : undefined
+      if (message === undefined) return ''
+      const source = message.source !== null && typeof message.source === 'object' ? message.source : undefined
+      if (source === undefined) return ''
+      return String(source.callId === null || source.callId === undefined ? '' : source.callId)
+    }
+
+    /**
+     * The plain text of a tool/result event, or undefined.
+     *
+     * Mirrors dsh-better-sidebar's resultText(): find the tool-result wrapper block (0.1.6 shape)
+     * or fall back to top-level content (0.1.7), then join the text blocks.
+     */
+    function resultTextOf(event) {
+      if (event === null || typeof event !== 'object') return undefined
+      const data = event.data !== null && typeof event.data === 'object' ? event.data : undefined
+      if (data === undefined) return undefined
+      const message = data.message !== null && typeof data.message === 'object' ? data.message : undefined
+      if (message === undefined || !Array.isArray(message.content)) return undefined
+      let blocks
+      for (let i = 0; i < message.content.length; i += 1) {
+        const block = message.content[i]
+        if (block !== null && typeof block === 'object' && String(block.type) === 'tool-result') {
+          blocks = Array.isArray(block.content) ? block.content : []
+          break
+        }
+      }
+      if (blocks === undefined) blocks = message.content
+      const parts = []
+      for (let i = 0; i < blocks.length; i += 1) {
+        const item = blocks[i]
+        if (item !== null && typeof item === 'object' && String(item.type) === 'text' && typeof item.text === 'string') {
+          parts.push(item.text)
+        }
+      }
+      return parts.length > 0 ? parts.join('\n') : undefined
+    }
+
+    /**
+     * Skill names from a skill_search result's rendered text.
+     *
+     * Each hit is a line starting with "- "; the skill name is the first whitespace-delimited
+     * token after it (kebab-case, no spaces). Description / when / why lines are indented with
+     * four spaces and do not match. The headline ("N match(es)...") and alarm lines start with
+     * other characters. An empty or error result yields no names.
+     */
+    function parseSearchHits(text) {
+      if (typeof text !== 'string' || text === '') return []
+      const names = []
+      const lines = text.split('\n')
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i]
+        if (line.length < 2 || line.charAt(0) !== '-' || line.charAt(1) !== ' ') continue
+        const parts = line.slice(2).trim().split(/\s+/)
+        if (parts.length > 0 && parts[0] !== '') names.push(parts[0])
+      }
+      return names
+    }
+
     // Test seam. The ledger is the part of this half that can be wrong while still looking
     // fine — a miscount renders a plausible list — so `test/usage-ledger.mjs` pins it: the test
     // calls this `apply` with a stub ctx and then reads these. Placed here because every value
     // above is initialized by now and nothing can have returned yet; every side effect of
     // `apply` lives inside `ctx.effect`, so an offline call registers nothing at all. The React
     // loader ignores unknown exports.
-    module.exports.__internals = { buildLedger, normalizeSkillName, splitNames, argsOf, LOAD_TOOLS, MAX_NAMES }
+    module.exports.__internals = { buildLedger, normalizeSkillName, splitNames, argsOf, resultCallIdOf, resultTextOf, parseSearchHits, LOAD_TOOLS, MAX_NAMES }
 
     /**
      * Fold one window of events into the running ledger.
@@ -450,6 +531,10 @@ window.__ModuleLoader__.load({
       }
 
       const entries = Array.isArray(source) ? source : []
+      // skill_search calls are indexed here so their tool/result events can be paired by callId
+      // in the second pass below. The call carries the query (not a skill name), so it contributes
+      // no row on its own — only its result does.
+      const searchCalls = {}
       for (let i = 0; i < entries.length; i += 1) {
         const wrapper = entries[i]
         if (wrapper === null || typeof wrapper !== 'object') continue
@@ -458,6 +543,15 @@ window.__ModuleLoader__.load({
         const data = event.data !== null && typeof event.data === 'object' ? event.data : undefined
         if (data === undefined) continue
         const tool = String(data.name === null || data.name === undefined ? '' : data.name)
+        if (tool === 'skill_search') {
+          const callId = String(data.callId === null || data.callId === undefined ? '' : data.callId)
+          if (callId !== '') {
+            const seq = typeof event.seq === 'number' && Number.isFinite(event.seq) ? event.seq : undefined
+            const eventKey = seq !== undefined ? 'seq:' + String(seq) : 'idx:' + String(i) + ':' + callId
+            searchCalls[callId] = { seq, eventKey, turn: data.turn, step: data.step }
+          }
+          continue
+        }
         if (LOAD_TOOLS[tool] !== true) continue
         const args = argsOf(data.arguments)
         if (args === undefined) continue
@@ -494,6 +588,31 @@ window.__ModuleLoader__.load({
           // reverse of the session's — a live report listed turn 31 above turn 5. Sorting by `seq`
           // reads as a timeline no matter what order the pages arrive in.
           take({ id: eventKey + '::' + skill, eventKey, skill, tool, turn: data.turn, step: data.step, seq: seq === undefined ? Number.MAX_SAFE_INTEGER : seq })
+        }
+      }
+
+      // ── pass 2: skill_search results ──────────────────────────────────────────────
+      //
+      // The tool/result event carries the hits the search found. Entries arrive newest-first, so
+      // the result (higher seq) is ahead of its call in the array — but searchCalls was built in
+      // the first pass above, so the pairing works regardless of array order. A result whose call
+      // was evicted from the window (or was never a skill_search) is silently skipped.
+      for (let i = 0; i < entries.length; i += 1) {
+        const wrapper = entries[i]
+        if (wrapper === null || typeof wrapper !== 'object') continue
+        const event = wrapper.event !== null && typeof wrapper.event === 'object' ? wrapper.event : wrapper
+        if (String(event.type) !== 'tool/result') continue
+        const callId = resultCallIdOf(event)
+        if (callId === '' || searchCalls[callId] === undefined) continue
+        const meta = searchCalls[callId]
+        const text = resultTextOf(event)
+        const hits = parseSearchHits(text)
+        let kept = 0
+        for (let n = 0; n < hits.length && kept < MAX_NAMES; n += 1) {
+          const skill = normalizeSkillName(hits[n])
+          if (skill === '') continue
+          kept += 1
+          take({ id: meta.eventKey + '::' + skill, eventKey: meta.eventKey, skill, tool: 'skill_search', turn: meta.turn, step: meta.step, seq: meta.seq === undefined ? Number.MAX_SAFE_INTEGER : meta.seq })
         }
       }
 
@@ -1165,7 +1284,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.17.0'
+    const VERSION = '1.17.1'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)

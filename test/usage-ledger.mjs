@@ -49,7 +49,7 @@ if (internals === undefined) {
   process.exit(1)
 }
 
-const { buildLedger, normalizeSkillName, splitNames } = internals
+const { buildLedger, normalizeSkillName, splitNames, resultCallIdOf, resultTextOf, parseSearchHits } = internals
 /** 供断言使用的视图：按显示顺序列出技能名。 */
 const names = (ledger) => ledger.files.map((file) => file.skill)
 
@@ -199,6 +199,118 @@ check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && spl
   check('被截断的名字不影响行数与调用数的一致性', capped.files.length === 8 && capped.calls === 1, 'rows=' + capped.files.length + ' calls=' + capped.calls)
   const none = buildLedger(entries([call('a', 'skill_load', { name: '///' }, 1), call('b', 'skill_load', { name: 'ok' }, 2)]), {})
   check('没有可用名字的调用不计入调用数', none.calls === 1 && none.files.length === 1, 'rows=' + none.files.length + ' calls=' + none.calls)
+}
+
+// --- 11. skill_search 结果追踪：搜索找到了什么，而非问了什么 ------------------------
+//
+// 搜索本身不是加载（第 1 节已验），但一次成功的搜索证明了库是活的——这个事件以前在
+// 标签页里完全不可见。修法是显示搜索*找到*的技能（tool/result 里的 hits），不是它*问*
+// 的词（tool/call 里的 query）。技能名在 result 事件里，所以先索引 call、再用 callId 配对。
+{
+  // tool/result 事件夹具：0.1.6 shape（tool-result wrapper block）。
+  let resSeq = 1000
+  const searchResult = (callId, text, seq) => ({
+    type: 'tool/result',
+    seq: seq === undefined ? (resSeq += 1) : seq,
+    time: 1,
+    data: {
+      message: {
+        source: { callId },
+        content: [{ type: 'tool-result', content: [{ type: 'text', text }] }],
+      },
+    },
+  })
+  // 0.1.7 shape：text blocks 在 message.content 顶层，无 tool-result wrapper。
+  const searchResultFlat = (callId, text, seq) => ({
+    type: 'tool/result',
+    seq: seq === undefined ? (resSeq += 1) : seq,
+    time: 1,
+    data: { message: { source: { callId }, content: [{ type: 'text', text }] } },
+  })
+  const sampleText = '2 match(es) in dsh-skill-router; showing 2\n- gh-cli  [trailofbits]\n    Enforces authenticated gh CLI workflows.\n- semgrep  [trailofbits]\n    Find security vulnerabilities.'
+
+  // 搜索 + 结果 → 找到的技能出现在列表里
+  const found = buildLedger(entries([
+    call('s1', 'skill_search', { query: 'security cli' }, 100),
+    searchResult('s1', sampleText, 101),
+  ]), {})
+  check('搜索结果中的技能被记录', names(found).join() === 'gh-cli,semgrep', JSON.stringify(names(found)))
+  check('搜索结果行的 tool 字段为 skill_search', found.files.every((f) => f.tool === 'skill_search'), JSON.stringify(found.files.map((f) => f.tool)))
+  check('一次搜索算一次调用', found.calls === 1, 'calls=' + found.calls)
+  check('两个命中是两个唯一技能', found.uniqueSkills === 2, 'unique=' + found.uniqueSkills)
+
+  // 0.1.7 shape 同样工作
+  const foundFlat = buildLedger(entries([
+    call('s2', 'skill_search', { query: 'x' }, 200),
+    searchResultFlat('s2', sampleText, 201),
+  ]), {})
+  check('0.1.7 shape 的结果同样解析', names(foundFlat).join() === 'gh-cli,semgrep', JSON.stringify(names(foundFlat)))
+
+  // 搜索无结果 → 不产生行
+  const empty = buildLedger(entries([
+    call('s3', 'skill_search', { query: 'zzz' }, 300),
+    searchResult('s3', '0 match(es) in dsh-skill-router; showing 0', 301),
+  ]), {})
+  check('搜索无结果时不产生行', empty.files.length === 0 && empty.calls === 0, 'rows=' + empty.files.length + ' calls=' + empty.calls)
+
+  // 搜索有结果但 result 事件不在窗口里 → 不产生行（call 一个人不算）
+  const noResult = buildLedger(entries([call('s4', 'skill_search', { query: 'x' }, 400)]), {})
+  check('搜索 call 无 result 时不产生行', noResult.files.length === 0 && noResult.calls === 0, 'rows=' + noResult.files.length)
+
+  // result 事件在数组中排在 call 前面（newest-first）→ 仍能配对
+  const reversed = buildLedger(entries([
+    searchResult('s5', sampleText, 501),
+    call('s5', 'skill_search', { query: 'x' }, 500),
+  ]), {})
+  check('result 在 call 之前（newest-first）仍能配对', names(reversed).join() === 'gh-cli,semgrep', JSON.stringify(names(reversed)))
+
+  // 搜索 + 加载混合：两种都出现
+  const mixed = buildLedger(entries([
+    call('s6', 'skill_search', { query: 'x' }, 600),
+    searchResult('s6', '- gh-cli  [trailofbits]\n    desc', 601),
+    call('s7', 'skill_load', { name: 'writing-plans' }, 602),
+  ]), {})
+  check('搜索与加载混合：两者都记录', names(mixed).join() === 'gh-cli,writing-plans', JSON.stringify(names(mixed)))
+  check('混合：2 次调用', mixed.calls === 2, 'calls=' + mixed.calls)
+
+  // 同一搜索跨页重复投递不产生重复行
+  const page1 = buildLedger(entries([
+    call('s8', 'skill_search', { query: 'x' }, 700),
+    searchResult('s8', sampleText, 701),
+  ]), { hasMore: true })
+  const page2 = buildLedger(entries([
+    call('s8', 'skill_search', { query: 'x' }, 700),
+    searchResult('s8', sampleText, 701),
+  ]), { hasMore: false, previous: page1 })
+  check('搜索结果跨页重复不产生重复行', page2.files.length === 2 && page2.calls === 1, 'rows=' + page2.files.length + ' calls=' + page2.calls)
+
+  // MAX_NAMES 同样限制搜索结果
+  const manyHits = Array.from({ length: 12 }, (_, k) => '- skill-' + k + '  [repo]').join('\n')
+  const cappedSearch = buildLedger(entries([
+    call('s9', 'skill_search', { query: 'x' }, 800),
+    searchResult('s9', manyHits, 801),
+  ]), {})
+  check('搜索结果也受 MAX_NAMES=8 限制', cappedSearch.files.length === 8, 'rows=' + cappedSearch.files.length)
+}
+
+// --- 12. parseSearchHits / resultTextOf / resultCallIdOf 单元 ----------------------
+{
+  check('parseSearchHits 提取技能名', parseSearchHits('- gh-cli  [trailofbits]\n    desc\n- semgrep').join() === 'gh-cli,semgrep', JSON.stringify(parseSearchHits('- gh-cli  [trailofbits]\n    desc\n- semgrep')))
+  check('parseSearchHits 跳过描述行', parseSearchHits('    description\n- skill-a').join() === 'skill-a', JSON.stringify(parseSearchHits('    description\n- skill-a')))
+  check('parseSearchHits 空文本返回空数组', parseSearchHits('').length === 0)
+  check('parseSearchHits 无命中返回空数组', parseSearchHits('0 match(es); showing 0').length === 0)
+  check('parseSearchHits 容忍非字符串', parseSearchHits(undefined).length === 0 && parseSearchHits(null).length === 0)
+  check('parseSearchHits 无 repo 的技能名', parseSearchHits('- bare-skill').join() === 'bare-skill', JSON.stringify(parseSearchHits('- bare-skill')))
+  check('parseSearchHits catalog 来源', parseSearchHits('- my-skill  [catalog:source]').join() === 'my-skill', JSON.stringify(parseSearchHits('- my-skill  [catalog:source]')))
+
+  const event = { type: 'tool/result', data: { message: { source: { callId: 'abc' }, content: [{ type: 'tool-result', content: [{ type: 'text', text: 'hi' }] }] } } }
+  check('resultCallIdOf 提取 callId', resultCallIdOf(event) === 'abc', resultCallIdOf(event))
+  check('resultTextOf 提取文本（0.1.6）', resultTextOf(event) === 'hi', resultTextOf(event))
+  const flat = { type: 'tool/result', data: { message: { source: { callId: 'xyz' }, content: [{ type: 'text', text: 'hello' }] } } }
+  check('resultCallIdOf 提取 callId（0.1.7）', resultCallIdOf(flat) === 'xyz', resultCallIdOf(flat))
+  check('resultTextOf 提取文本（0.1.7）', resultTextOf(flat) === 'hello', resultTextOf(flat))
+  check('resultCallIdOf 容忍坏输入', resultCallIdOf(undefined) === '' && resultCallIdOf({}) === '' && resultCallIdOf({ data: {} }) === '')
+  check('resultTextOf 容忍坏输入', resultTextOf(undefined) === undefined && resultTextOf({}) === undefined && resultTextOf({ data: {} }) === undefined)
 }
 
 console.log(problems.length === 0 ? '\n技能账本: OK' : '\n技能账本 FAILED:\n  ' + problems.join('\n  '))
