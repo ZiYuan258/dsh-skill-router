@@ -49,7 +49,7 @@ if (internals === undefined) {
   process.exit(1)
 }
 
-const { buildLedger, normalizeSkillName, splitNames, resultCallIdOf, resultTextOf, parseSearchHits } = internals
+const { buildLedger, normalizeSkillName, splitNames, resultCallIdOf, resultTextOf, parseSearchHits, parseRunCodeCalls } = internals
 /** 供断言使用的视图：按显示顺序列出技能名。 */
 const names = (ledger) => ledger.files.map((file) => file.skill)
 
@@ -323,6 +323,60 @@ check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && spl
   check('resultTextOf 提取文本（0.1.7）', resultTextOf(flat) === 'hello', resultTextOf(flat))
   check('resultCallIdOf 容忍坏输入', resultCallIdOf(undefined) === '' && resultCallIdOf({}) === '' && resultCallIdOf({ data: {} }) === '')
   check('resultTextOf 容忍坏输入', resultTextOf(undefined) === undefined && resultTextOf({}) === undefined && resultTextOf({ data: {} }) === undefined)
+}
+
+// --- 13. run_code 内嵌调用解析 ------------------------------------------------
+{
+  // run_code 事件：arguments.code 含 tools.skill_search 和 tools.skill_load 调用
+  const rcCode = [
+    'const a = await tools.skill_search({ query: "plugin security review", limit: 8 })',
+    'const b = await tools.skill_load({ name: "test-driven-development" })',
+    'const c = await tools.skill_search({ query: "univer spreadsheet excel", limit: 5 })',
+  ].join('\n')
+  const rcEvent = call('rc1', 'run_code', { code: rcCode, description: 'test' }, 500)
+  const rcLedger = buildLedger(entries([rcEvent]), {})
+  check('run_code 含 skill_search 产生查询行', rcLedger.files.some(f => f.skill === '\u{1F50D} plugin security review' && f.tool === 'skill_search'), JSON.stringify(names(rcLedger)))
+  check('run_code 含第二个 skill_search 也产生查询行', rcLedger.files.some(f => f.skill === '\u{1F50D} univer spreadsheet excel' && f.tool === 'skill_search'), JSON.stringify(names(rcLedger)))
+  check('run_code 含 skill_load 产生加载行', rcLedger.files.some(f => f.skill === 'test-driven-development' && f.tool === 'skill_load'), JSON.stringify(names(rcLedger)))
+  check('run_code 内嵌调用计入 calls（2 搜索 + 1 加载 = 3 次调用）', rcLedger.calls === 3, 'calls=' + rcLedger.calls)
+
+  // bracket access form: tools["skill_search"]
+  const rcCode2 = 'await tools["skill_search"]({ query: "chinese cjk tokenizer", limit: 3 })'
+  const rc2 = buildLedger(entries([call('rc2', 'run_code', { code: rcCode2, description: 'test' }, 510)]), {})
+  check('run_code bracket access 也识别', rc2.files.some(f => f.skill === '\u{1F50D} chinese cjk tokenizer'), JSON.stringify(names(rc2)))
+
+  // skill_load with names (comma-separated)
+  const rcCode3 = 'await tools.skill_load({ names: "alpha, beta, gamma" })'
+  const rc3 = buildLedger(entries([call('rc3', 'run_code', { code: rcCode3, description: 'test' }, 520)]), {})
+  check('run_code skill_load names 拆分', names(rc3).join() === 'alpha,beta,gamma', JSON.stringify(names(rc3)))
+
+  // variable query (not a literal) — invisible, acceptable false negative
+  const rcCode4 = 'const q = "dynamic"; await tools.skill_search({ query: q, limit: 3 })'
+  const rc4 = buildLedger(entries([call('rc4', 'run_code', { code: rcCode4, description: 'test' }, 530)]), {})
+  check('run_code 变量查询不产生行（假阴性可接受）', rc4.files.length === 0, 'rows=' + rc4.files.length)
+
+  // run_code without skill calls — no rows
+  const rcCode5 = 'const x = await tools.pwsh({ command: "ls" })'
+  const rc5 = buildLedger(entries([call('rc5', 'run_code', { code: rcCode5, description: 'test' }, 540)]), {})
+  check('run_code 无 skill 调用不产生行', rc5.files.length === 0, 'rows=' + rc5.files.length)
+
+  // run_code with bad/missing code — no rows, no throw
+  const rc6 = buildLedger(entries([call('rc6', 'run_code', { description: 'no code' }, 550)]), {})
+  check('run_code 无 code 字段不产生行', rc6.files.length === 0, 'rows=' + rc6.files.length)
+  const rc7 = buildLedger(entries([call('rc7', 'run_code', '{"description":"bad"}', 560)]), {})
+  check('run_code arguments 为 JSON 字符串时同样识别', rc7.files.length === 0, 'rows=' + rc7.files.length)
+
+  // parseRunCodeCalls unit tests
+  const parsed = parseRunCodeCalls('tools.skill_search({ query: "test" }); tools.skill_load({ name: "gh-cli" })')
+  check('parseRunCodeCalls 提取 search', parsed.searches.length === 1 && parsed.searches[0].query === 'test', JSON.stringify(parsed.searches))
+  check('parseRunCodeCalls 提取 load', parsed.loads.length === 1 && parsed.loads[0].name === 'gh-cli', JSON.stringify(parsed.loads))
+  check('parseRunCodeCalls 空代码返回空', parseRunCodeCalls('').searches.length === 0 && parseRunCodeCalls('').loads.length === 0)
+  check('parseRunCodeCalls 容忍非字符串', parseRunCodeCalls(undefined).searches.length === 0 && parseRunCodeCalls(null).loads.length === 0)
+
+  // dedup: same run_code event delivered twice (cross-page) — no duplicate rows
+  const rcDup1 = buildLedger(entries([call('rcD', 'run_code', { code: rcCode, description: 'test' }, 600)]), { hasMore: true })
+  const rcDup2 = buildLedger(entries([call('rcD', 'run_code', { code: rcCode, description: 'test' }, 600)]), { hasMore: false, previous: rcDup1 })
+  check('run_code 跨页重复不产生重复行', rcDup2.files.length === rcDup1.files.length, 'p1=' + rcDup1.files.length + ' p2=' + rcDup2.files.length)
 }
 
 console.log(problems.length === 0 ? '\n技能账本: OK' : '\n技能账本 FAILED:\n  ' + problems.join('\n  '))

@@ -410,10 +410,10 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.17.2 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.17.3 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
-> **v1.17.1 起：搜索结果也入列；v1.17.2 起：查询兜底。** 一次成功的 `skill_search` 以前在这个标签页里不可见——搜索是"找"不是"用"，不计入加载计数。v1.17.1 让标签页显示搜索*找到*了哪些技能（从 `tool/result` 事件的 hits 解析，标 `skill_search` 以区别于 `skill_load`）。但 `eventSource` 窗口实际只含 `tool/call` 不含 `tool/result`（dsh-better-sidebar 的 `changes.ops` 路由正是为此而建），所以 v1.17.1 在生产里仍看不到。v1.17.2 加了第三遍：对结果不在窗口里的搜索，显示查询本身（前缀 🔍），让"搜过"这件事至少看得见。搜索本身仍不算一次加载调用。
+> **v1.17.1 起：搜索结果也入列；v1.17.2 起：查询兜底；v1.17.3 起：run_code 内嵌调用。** 一次成功的 `skill_search` 以前在这个标签页里不可见——搜索是"找"不是"用"，不计入加载计数。v1.17.1 让标签页显示搜索*找到*了哪些技能（从 `tool/result` 事件的 hits 解析，标 `skill_search` 以区别于 `skill_load`）。但 `eventSource` 窗口实际只含 `tool/call` 不含 `tool/result`（dsh-better-sidebar 的 `changes.ops` 路由正是为此而建），所以 v1.17.1 在生产里仍看不到。v1.17.3 加了第三遍：对结果不在窗口里的搜索，显示查询本身（前缀 🔍），让"搜过"这件事至少看得见。v1.17.3 发现根因：agent 用 `run_code` 作唯一工具接口，`skill_search`/`skill_load` 调用嵌在 TypeScript 代码体里，不是独立的 `tool/call` 事件——前三遍全找不到。v1.17.3 在第一遍里解析 `run_code` 的 `code` 参数，用正则提取内嵌的 `tools.skill_search({query:…})` 和 `tools.skill_load({name:…})`，让它们也入列。搜索本身仍不算一次加载调用。
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
 
@@ -460,7 +460,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.17.2 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.17.3 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 

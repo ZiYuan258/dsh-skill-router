@@ -470,13 +470,44 @@ window.__ModuleLoader__.load({
       return names
     }
 
+    /**
+     * Internal skill_search / skill_load calls embedded inside a run_code code body.
+     *
+     * The agent uses run_code as its sole tool interface: it writes TypeScript containing
+     * `await tools.skill_search({ query: "..." })` and run_code executes it. eventSource only
+     * records a tool/call for run_code itself — the internal calls are NOT separate tool/call
+     * events. This parser reads the code string and extracts the queries / names so the tab
+     * can show them. It handles dot access (`tools.skill_search`) and bracket access
+     * (`tools["skill_search"]`), and string literals in single, double, or backtick quotes.
+     * A query or name that is a variable (not a literal) is invisible to this parser — that is
+     * acceptable: the common case is a literal, and a missed variable call is a false negative,
+     * not a false positive.
+     */
+    function parseRunCodeCalls(code) {
+      if (typeof code !== 'string' || code === '') return { searches: [], loads: [] }
+      const searches = []
+      const loads = []
+      const searchRe = /tools(?:\.skill_search|\["skill_search"\])\s*\(\s*\{[\s\S]*?query\s*:\s*([\x27\x22`])([^\x27\x22`]+)\1/g
+      let m
+      while ((m = searchRe.exec(code)) !== null) {
+        const q = m[2].trim()
+        if (q !== '') searches.push({ query: q })
+      }
+      const loadRe = /tools(?:\.skill_load|\["skill_load"\])\s*\(\s*\{[\s\S]*?(?:name|names)\s*:\s*([\x27\x22`])([^\x27\x22`]+)\1/g
+      while ((m = loadRe.exec(code)) !== null) {
+        const n = m[2].trim()
+        if (n !== '') loads.push({ name: n })
+      }
+      return { searches, loads }
+    }
+
     // Test seam. The ledger is the part of this half that can be wrong while still looking
     // fine — a miscount renders a plausible list — so `test/usage-ledger.mjs` pins it: the test
     // calls this `apply` with a stub ctx and then reads these. Placed here because every value
     // above is initialized by now and nothing can have returned yet; every side effect of
     // `apply` lives inside `ctx.effect`, so an offline call registers nothing at all. The React
     // loader ignores unknown exports.
-    module.exports.__internals = { buildLedger, normalizeSkillName, splitNames, argsOf, resultCallIdOf, resultTextOf, parseSearchHits, LOAD_TOOLS, MAX_NAMES }
+    module.exports.__internals = { buildLedger, normalizeSkillName, splitNames, argsOf, resultCallIdOf, resultTextOf, parseSearchHits, parseRunCodeCalls, LOAD_TOOLS, MAX_NAMES }
 
     /**
      * Fold one window of events into the running ledger.
@@ -554,6 +585,33 @@ window.__ModuleLoader__.load({
             const searchArgs = argsOf(data.arguments)
             const query = searchArgs !== undefined && typeof searchArgs.query === 'string' ? searchArgs.query.trim() : ''
             searchCalls[callId] = { seq, eventKey, turn: data.turn, step: data.step, query }
+          }
+          continue
+        }
+        if (tool === 'run_code') {
+          // The agent writes TypeScript containing `await tools.skill_search(...)` and run_code
+          // executes it. eventSource records only the run_code tool/call — the internal calls are
+          // NOT separate events. Parse the code body to recover them so the tab can show them.
+          const rcArgs = argsOf(data.arguments)
+          if (rcArgs !== undefined && typeof rcArgs.code === 'string') {
+            const rcSeq = typeof event.seq === 'number' && Number.isFinite(event.seq) ? event.seq : undefined
+            const rcEventKey = rcSeq !== undefined ? 'seq:' + String(rcSeq) : 'idx:' + String(i)
+            const rcCallId = String(data.callId === null || data.callId === undefined ? '' : data.callId)
+            const rc = parseRunCodeCalls(rcArgs.code)
+            for (let s = 0; s < rc.searches.length; s += 1) {
+              const synId = 'runcode:' + rcCallId + ':' + String(s)
+              searchCalls[synId] = { seq: rcSeq, eventKey: rcEventKey + ':rcs:' + String(s), turn: data.turn, step: data.step, query: rc.searches[s].query }
+            }
+            for (let l = 0; l < rc.loads.length; l += 1) {
+              const names = splitNames(rc.loads[l].name)
+              let kept = 0
+              for (let n = 0; n < names.length && kept < MAX_NAMES; n += 1) {
+                const skill = normalizeSkillName(names[n])
+                if (skill === '') continue
+                kept += 1
+                take({ id: rcEventKey + ':rcl:' + String(l) + '::' + skill, eventKey: rcEventKey + ':rcl:' + String(l), skill, tool: 'skill_load', turn: data.turn, step: data.step, seq: rcSeq === undefined ? Number.MAX_SAFE_INTEGER : rcSeq })
+              }
+            }
           }
           continue
         }
@@ -1303,7 +1361,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.17.2'
+    const VERSION = '1.17.3'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
