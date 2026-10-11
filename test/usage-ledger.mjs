@@ -74,7 +74,7 @@ check('内置 skill 被记录', names(resident).join() === 'writing-plans', JSON
 const ref = buildLedger(entries([call('c3', 'skill_ref', { name: 'semgrep', path: 'a.md' })]), {})
 check('skill_ref 被记录', names(ref).join() === 'semgrep', JSON.stringify(names(ref)))
 const searched = buildLedger(entries([call('c4', 'skill_search', { query: 'x' })]), {})
-check('skill_search 不算加载（搜索不等于使用）', searched.files.length === 0 && searched.calls === 0, JSON.stringify(names(searched)))
+check('skill_search 无 result 时显示查询行', searched.files.length === 1 && searched.files[0].skill === '🔍 x' && searched.files[0].tool === 'skill_search', JSON.stringify(names(searched)))
 const unrelated = buildLedger(entries([call('c5', 'pwsh', { command: 'ls' }), other('tool/result')]), {})
 check('无关工具与其它事件类型被忽略', unrelated.files.length === 0)
 // 参数是原始 JSON 字符串时同样要认出来（模型可能给字符串）。
@@ -253,9 +253,21 @@ check('splitNames 容忍非字符串', splitNames(undefined).length === 0 && spl
   ]), {})
   check('搜索无结果时不产生行', empty.files.length === 0 && empty.calls === 0, 'rows=' + empty.files.length + ' calls=' + empty.calls)
 
-  // 搜索有结果但 result 事件不在窗口里 → 不产生行（call 一个人不算）
+  // 搜索有结果但 result 事件不在窗口里 → 显示查询行（eventSource 不含 tool/result，这是生产的常态）
   const noResult = buildLedger(entries([call('s4', 'skill_search', { query: 'x' }, 400)]), {})
-  check('搜索 call 无 result 时不产生行', noResult.files.length === 0 && noResult.calls === 0, 'rows=' + noResult.files.length)
+  check('搜索 call 无 result 时显示查询行', noResult.files.length === 1 && noResult.files[0].skill === '🔍 x' && noResult.calls === 1, 'rows=' + noResult.files.length + ' names=' + JSON.stringify(names(noResult)))
+
+  // 查询行跨页重复投递不产生重复行
+  const qPage1 = buildLedger(entries([call('s10', 'skill_search', { query: 'deploy' }, 900)]), { hasMore: true })
+  const qPage2 = buildLedger(entries([call('s10', 'skill_search', { query: 'deploy' }, 900)]), { hasMore: false, previous: qPage1 })
+  check('查询行跨页重复不产生重复行', qPage2.files.length === 1 && qPage2.calls === 1, 'rows=' + qPage2.files.length + ' calls=' + qPage2.calls)
+
+  // 有 result 的搜索不显示查询行（result 优先于 query fallback）
+  const withResult = buildLedger(entries([
+    call('s11', 'skill_search', { query: 'security' }, 950),
+    searchResult('s11', sampleText, 951),
+  ]), {})
+  check('有 result 时不显示查询行', withResult.files.every((f) => !f.skill.startsWith('🔍 ')), JSON.stringify(names(withResult)))
 
   // result 事件在数组中排在 call 前面（newest-first）→ 仍能配对
   const reversed = buildLedger(entries([

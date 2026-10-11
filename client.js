@@ -532,8 +532,11 @@ window.__ModuleLoader__.load({
 
       const entries = Array.isArray(source) ? source : []
       // skill_search calls are indexed here so their tool/result events can be paired by callId
-      // in the second pass below. The call carries the query (not a skill name), so it contributes
-      // no row on its own — only its result does.
+      // in the second pass below. The eventSource window carries tool/call events but NOT
+      // tool/result events (dsh-better-sidebar's changes.ops route exists precisely because
+      // the eventSource lacks them — see ops-stream.ts:6). So a third pass after the result
+      // pass shows the query itself for any search whose result is not in the window — the
+      // only signal a search happened when results are unavailable.
       const searchCalls = {}
       for (let i = 0; i < entries.length; i += 1) {
         const wrapper = entries[i]
@@ -548,7 +551,9 @@ window.__ModuleLoader__.load({
           if (callId !== '') {
             const seq = typeof event.seq === 'number' && Number.isFinite(event.seq) ? event.seq : undefined
             const eventKey = seq !== undefined ? 'seq:' + String(seq) : 'idx:' + String(i) + ':' + callId
-            searchCalls[callId] = { seq, eventKey, turn: data.turn, step: data.step }
+            const searchArgs = argsOf(data.arguments)
+            const query = searchArgs !== undefined && typeof searchArgs.query === 'string' ? searchArgs.query.trim() : ''
+            searchCalls[callId] = { seq, eventKey, turn: data.turn, step: data.step, query }
           }
           continue
         }
@@ -605,6 +610,7 @@ window.__ModuleLoader__.load({
         const callId = resultCallIdOf(event)
         if (callId === '' || searchCalls[callId] === undefined) continue
         const meta = searchCalls[callId]
+        meta.resolved = true
         const text = resultTextOf(event)
         const hits = parseSearchHits(text)
         let kept = 0
@@ -614,6 +620,19 @@ window.__ModuleLoader__.load({
           kept += 1
           take({ id: meta.eventKey + '::' + skill, eventKey: meta.eventKey, skill, tool: 'skill_search', turn: meta.turn, step: meta.step, seq: meta.seq === undefined ? Number.MAX_SAFE_INTEGER : meta.seq })
         }
+      }
+
+      // ── pass 3: skill_search queries without results ─────────────────────────────
+      //
+      // The eventSource window carries tool/call events but NOT tool/result events (see comment
+      // above the first pass). So pass 2 finds nothing in production, and a search would be
+      // invisible in the tab. For any indexed search whose result is not in the window, show the
+      // query itself — prefixed with 🔍 to distinguish it from a skill name — so the tab records
+      // that a search happened and what was asked.
+      for (const callId in searchCalls) {
+        const meta = searchCalls[callId]
+        if (meta.resolved === true || meta.query === '') continue
+        take({ id: meta.eventKey + '::search:' + meta.query, eventKey: meta.eventKey, skill: '🔍 ' + meta.query, tool: 'skill_search', turn: meta.turn, step: meta.step, seq: meta.seq === undefined ? Number.MAX_SAFE_INTEGER : meta.seq })
       }
 
       // Oldest first, so the list reads as the session did. A record with no numeric `seq` sorts
@@ -1284,7 +1303,7 @@ window.__ModuleLoader__.load({
      * `test/package-contract.mjs` asserts that it does — a label that can drift is worse than no
      * label at all.
      */
-    const VERSION = '1.17.1'
+    const VERSION = '1.17.2'
 
     function UsageView(props) {
       const diag = useUsageLedger(props)
