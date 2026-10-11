@@ -410,7 +410,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.16.2 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.17.0 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 **零模型 token。** 数据全部来自**会话账本**，而账本由会话作用域插槽交给组件：
@@ -458,7 +458,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.16.2 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.17.0 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -761,7 +761,7 @@ unsupported JSON schema: schema.type must be one of object/array/string/number/i
 npm test
 ```
 
-三十二个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
+三十三个零依赖脚本。机器上能找到真实技能库时就直接对真库跑，否则**在系统临时目录生成夹具库**，所以裸克隆也能测：
 
 | 脚本 | 覆盖内容 |
 |---|---|
@@ -778,6 +778,7 @@ npm test
 | `minimal-host.mjs` | 只注入 `ctx.fs` 时的降级：三个工具仍可用，可选 API 缺席不崩溃 |
 | `link-support.mjs` | `.skill-src` 是目录链接时搜索与加载仍然可用（Windows junction / POSIX symlink）；运行器不允许建链接时报告为跳过 |
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
+| `matching-expansion.mjs` | v1.17 词干+同义词+中英映射：`debugging`→`debug`、`deploy`→`release`、`性能`→`performance` 等跨形/跨义/跨语言匹配；精确词仍命中（回归） |
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
 | `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
 | `discovery-report.mjs` | **实验读数脚本**（`node tools/discovery-report.mjs`）：按**随机分臂**汇总实验（treatment vs control，而不是"注入 vs 未注入"——后者是不同任务总体），主指标只算**每会话第一个 HIGH**（唯一可证明先于任何提示的观测），并，并且**把"未知"与"0 次"严格分开**——按回合的计数天生右截断（回合结束才在下一回合落盘），未配对的回合必须报成 unknown 而不是 search=0，否则上升的搜索率会被算成没变化；配对键是 **`(sessionKey, turn)`** 而不是 `turn`（实测 14 个 turn 号跨会话重复），且按回合**真正去重**（多条发现记录取最后一条、多条计数记录逐项求和，否则同一回合会在分子分母里各算两次）；无会话标签的旧记录单独计数；坏行不吞掉；`indexRows` 出现多个取值时报警（语料换过）；token 文本默认不打印 |
@@ -811,7 +812,7 @@ host.js                       插件本体：apply()、buildSkillRouterTools()�
 client.js                     客户端半：在 conversation.view 注册「技能」标签页
 cordis.patch.yml              被组合进去的那一行（id: skill-router, name: dsh-skill-router）
 SECURITY.md / SECURITY.zh.md  安全政策（英文 / 中文）
-test/                         三十二个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
+test/                         三十三个测试，外加一个仅开发用的 @deepseek-ai/dsh-tools 替身
 tools/publish-release.mjs     为版本创建 GitHub Release（发版第 5 步，见 RELEASING.md）
 tools/audit-library-risk.mjs  技能库风险审计（政策里的统计由它推导）
 tools/audit-client-halves.mjs 本机客户端半的打包契约诊断

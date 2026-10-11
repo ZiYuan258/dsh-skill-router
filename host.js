@@ -388,6 +388,107 @@ function tokenize(query) {
 }
 
 /**
+ * Lightweight suffix stripping for query-token expansion (v1.17).
+ *
+ * The existing `.includes()` already handles short-query-in-long-text ("debug" matches
+ * "debugging"). This fixes the reverse: "debugging" should also match "debug". We stem
+ * the QUERY token to a shorter root and add it as a variant — the original token stays,
+ * so over-stemming can only add false positives, never false negatives.
+ *
+ * Conservative by design: only strips unambiguous, common suffixes. Not a full Porter
+ * stemmer — those over-stem for short skill names ("test" → "tes" is wrong).
+ */
+function stem(word) {
+  if (word.length <= 4) return word
+  if (word.endsWith('ization') && word.length > 8) return word.slice(0, -7) + 'ize'
+  if (word.endsWith('ation') && word.length > 7) return word.slice(0, -5) + 'e'
+  if (word.endsWith('ment') && word.length > 6) return word.slice(0, -4)
+  if (word.endsWith('ness') && word.length > 6) return word.slice(0, -4)
+  if (word.endsWith('ing') && word.length > 5) return word.slice(0, -3)
+  if (word.endsWith('ies') && word.length > 5) return word.slice(0, -3) + 'y'
+  if (word.endsWith('ed') && word.length > 5) return word.slice(0, -2)
+  if (word.endsWith('er') && word.length > 5) return word.slice(0, -2)
+  if (word.endsWith('es') && word.length > 5) return word.slice(0, -2)
+  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) return word.slice(0, -1)
+  return word
+}
+
+/**
+ * Curated synonym expansion for common skill-domain terms (v1.17).
+ *
+ * The lexical `.includes()` match fails on synonyms: "deploy" shares no substring with
+ * "release". This map adds the most frequent cross-term relationships observed in skill
+ * descriptions. Kept small and hand-curated — a large automatic synonym list would add
+ * more false positives than true hits.
+ */
+const SYNONYMS = {
+  deploy: ['release', 'publish', 'ship', 'ci'],
+  debug: ['troubleshoot', 'diagnose'],
+  test: ['verify', 'validate', 'assert', 'spec'],
+  doc: ['documentation', 'readme', 'guide'],
+  docs: ['documentation', 'readme', 'guide'],
+  security: ['vulnerability', 'cve', 'exploit'],
+  performance: ['optimize', 'optimization', 'latency', 'speed'],
+  optimize: ['optimization', 'performance'],
+  refactor: ['restructure', 'simplify', 'clean'],
+  review: ['audit', 'inspect'],
+  audit: ['review', 'inspect'],
+  build: ['compile', 'bundle'],
+  compile: ['build', 'transpile'],
+}
+
+/**
+ * Chinese → English skill-term map for cross-lingual search (v1.17).
+ *
+ * CJK tokens (e.g. '性能') will never `.includes()` an English skill description. This
+ * map adds English equivalents for the most common skill-domain Chinese terms. Without
+ * it, a Chinese query can only match Chinese skill descriptions (rare in the library).
+ */
+const CJK_TO_EN = {
+  '性能': ['performance', 'optimize'],
+  '测试': ['test', 'testing', 'verify'],
+  '部署': ['deploy', 'release', 'publish'],
+  '安全': ['security', 'safe'],
+  '文档': ['doc', 'documentation'],
+  '调试': ['debug', 'troubleshoot'],
+  '优化': ['optimize', 'performance'],
+  '重构': ['refactor', 'restructure'],
+  '审查': ['review', 'audit'],
+  '依赖': ['dependency', 'dependencies'],
+  '构建': ['build', 'compile'],
+  '编译': ['compile', 'build'],
+  '发布': ['release', 'publish', 'deploy'],
+  '验证': ['verify', 'validate', 'test'],
+  '监控': ['monitor', 'observability'],
+  '日志': ['log', 'logging'],
+  '配置': ['config', 'configuration'],
+  '错误': ['error', 'bug', 'exception'],
+  '异常': ['exception', 'error'],
+}
+
+/**
+ * Expand one query token into a group of variants for matching (v1.17).
+ *
+ * The original token is always first and always present — expansion is additive.
+ * Variants: [token, stem(token), ...synonyms, ...cjkToEn]
+ * A group matches if ANY variant hits; the best-scoring variant wins.
+ */
+function expandToken(token) {
+  const variants = [token]
+  const stemmed = stem(token)
+  if (stemmed !== token && !variants.includes(stemmed)) variants.push(stemmed)
+  const syns = SYNONYMS[token]
+  if (Array.isArray(syns)) {
+    for (const s of syns) if (!variants.includes(s)) variants.push(s)
+  }
+  const ens = CJK_TO_EN[token]
+  if (Array.isArray(ens)) {
+    for (const e of ens) if (!variants.includes(e)) variants.push(e)
+  }
+  return variants
+}
+
+/**
  * Field weights, in one place because two callers rank with them.
  *
  * `name` beats `whenToUse` because a name hit is the thing itself; `whenToUse` beats
@@ -429,35 +530,54 @@ function scoreRow(row, context) {
   // 详见 `nameMatchForm`。
   let nameForm = -1
   const why = explaining ? [] : undefined
-  for (const token of tokens) {
-    let part = 0
-    const fields = []
-    if (nameText.includes(token)) {
-      part += WEIGHT.name
-      nameHits += 1
-      nameForm = Math.max(nameForm, nameMatchForm(nameText, token))
-      fields.push('name')
+  // Token groups (v1.17): each element is either a string (legacy/discovery) or an
+  // array of variants (expanded token from skill_search). A group matches if ANY variant
+  // hits; the best-scoring variant's contribution wins. This lets "debugging" match
+  // "debug" (stem), "deploy" match "release" (synonym), and "性能" match "performance"
+  // (CJK→EN) — all without changing the scoring weights or the downstream ranking.
+  const isGroups = tokens.length > 0 && Array.isArray(tokens[0])
+  for (const item of tokens) {
+    const group = isGroups ? item : [item]
+    let bestPart = 0
+    let groupHitName = false
+    let groupNameForm = -1
+    let bestFields = []
+    for (const variant of group) {
+      let part = 0
+      const fields = []
+      if (nameText.includes(variant)) {
+        part += WEIGHT.name
+        fields.push('name')
+        groupHitName = true
+        groupNameForm = Math.max(groupNameForm, nameMatchForm(nameText, variant))
+      }
+      if (descText.includes(variant)) {
+        part += WEIGHT.description
+        fields.push('description')
+      }
+      if (whenText !== '' && whenText.includes(variant)) {
+        part += WEIGHT.whenToUse
+        fields.push('whenToUse')
+      }
+      if (lowerPath.includes(variant)) {
+        part += WEIGHT.path
+        fields.push('path')
+      }
+      if (part > bestPart) {
+        bestPart = part
+        bestFields = fields
+      }
     }
-    if (descText.includes(token)) {
-      part += WEIGHT.description
-      fields.push('description')
-    }
-    if (whenText !== '' && whenText.includes(token)) {
-      part += WEIGHT.whenToUse
-      fields.push('whenToUse')
-    }
-    if (lowerPath.includes(token)) {
-      part += WEIGHT.path
-      fields.push('path')
-    }
-    if (part === 0) {
+    if (bestPart === 0) {
       if (requireAll) return undefined
-      if (why !== undefined) why.push(token + ': -')
+      if (why !== undefined) why.push(String(group[0]) + ': -')
       continue
     }
+    if (groupHitName) nameHits += 1
+    nameForm = Math.max(nameForm, groupNameForm)
     matchCount += 1
-    score += part
-    if (why !== undefined) why.push(token + ': +' + String(part) + ' (' + fields.join('+') + ')')
+    score += bestPart
+    if (why !== undefined) why.push(String(group[0]) + ': +' + String(bestPart) + ' (' + bestFields.join('+') + ')')
   }
   const exact = String(ctx.exactText ?? '').trim().toLowerCase() !== '' && nameText === String(ctx.exactText).trim().toLowerCase()
   if (exact) score += WEIGHT.exactName
@@ -1436,7 +1556,9 @@ export function buildSkillRouterTools(ctx, register) {
       if (searchRows.length === 0) {
         return jsonSafe({ library: loaded.root, starterLibrary: loaded.bundled === true ? true : undefined, total: 0, shown: 0, hits: [], error: loaded.error === '' ? 'the skill index is empty' : loaded.error })
       }
-      const tokens = tokenize(query)
+      // v1.17: expand each token into a group of variants (stem + synonyms + CJK→EN).
+      // scoreRow handles groups natively; discovery keeps flat tokens (different semantics).
+      const tokens = tokenize(query).map(expandToken)
       if (tokens.length === 0 && repoFilter === '') {
         // Latin script only, and that is a property of the index rather than a bug to hide:
         // a query written in Chinese or Japanese yields no keywords at all. Say what to do
@@ -1447,7 +1569,7 @@ export function buildSkillRouterTools(ctx, register) {
           total: 0,
           shown: 0,
           hits: [],
-          error: 'the query has no searchable keyword — this index is matched on Latin script (letters and digits), so pass keywords in English, e.g. "video render" rather than "做视频"',
+          error: 'the query has no searchable keyword — pass keywords in English or Chinese, e.g. "video render" or "视频 渲染"',
         })
       }
       // Two passes over the same scoring: `all` requires every keyword, `any` accepts a
