@@ -10,11 +10,11 @@
 // major.minor.patch 元组与之完全相同、且该比较符自身也带预发布标签**时才被放行。所以"覆盖所有
 // 0.1.x 的 rc"必须为每个 tuple 显式写一个带预发布的分支，没有捷径。
 //
-// 这个仓库零依赖，所以这里不引入 semver：用一个够用的判定 + 从 DSH 安装处取真实的 semver 来交叉验证。
-import { existsSync, readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
-import { pathToFileURL } from 'node:url'
-import { dirname, join } from 'node:path'
+// 这个仓库零依赖，所以这里不引入 semver：自己实现一个够用的 satisfies（见文件下半段）。
+// 已装 harness 的版本问 CLI 自己（\`dsh --version\`）——DSH 0.2 把包放在 asar 与 pnpm 链接
+// 后面，磁盘上没有稳定的版本清单文件。
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 
 const root = new URL('../', import.meta.url)
 const problems = []
@@ -32,34 +32,13 @@ ok('声明了 dsh.engines.dsh', typeof range === 'string' && range !== '', Strin
 const published = [
   '0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-rc.3',
   '0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2',
+  // 0.2.x 线：0.1.7-rc.2 之后上游进 0.2，本机装着的就是 0.2.1-rc.2。
+  '0.2.0-rc.1', '0.2.0', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1',
 ]
-// 明确不该被接纳的：下一个 minor 的预发布与正式版。
-const rejected = ['0.2.0-0', '0.2.0', '0.3.0-0', '0.0.9']
-
-/** 找 DSH 安装里的真实 semver（只读，用来交叉验证）。 */
-function findSemver() {
-  const candidates = []
-  // 从 DSH_HOME / 用户主目录推导，而不是写死某台机器的路径：这个仓库有一条测试专门禁止
-  // 本机绝对路径进代码，而"为了测试方便"绕过它等于把那条规则废掉。
-  const homes = [process.env.DSH_HOME, process.env.USERPROFILE === undefined ? undefined : join(process.env.USERPROFILE, '.dsh'), process.env.HOME === undefined ? undefined : join(process.env.HOME, '.dsh')]
-  for (const home of homes) {
-    if (home === undefined || home === '') continue
-    candidates.push(join(home, 'profiles', 'node_modules', 'semver'))
-    candidates.push(join(home, 'profiles', 'desktop', 'node_modules', 'semver'))
-  }
-  // 打包安装：从本仓库往上找不到，所以只探父目录里的 node_modules（不写死盘符）。
-  let dir = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
-  for (let i = 0; i < 4 && dir !== ''; i += 1) {
-    candidates.push(join(dir, 'node_modules', 'semver'))
-    const parent = dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  for (const candidate of candidates) {
-    if (existsSync(join(candidate, 'index.js'))) return candidate
-  }
-  return undefined
-}
+// 明确不该被接纳的：下一个 minor（0.3）的预发布与正式版，以及更低的 0.0.x。
+// 注意 0.2.2+ 的**预发布**不在范围内（semver 的 tuple 规则要求逐一列举），这是已知边界；
+// 一旦它成为真实安装版，下面那条"已装版本在范围内"会报出来。
+const rejected = ['0.3.0-0', '0.3.0', '0.0.9']
 
 // ── 结构检查（离线也能跑）────────────────────────────────────────────────────────
 // 每条 OR 分支都必须自带预发布标签，否则它覆盖不到那个 tuple 的 rc —— 这正是当初漏掉的点。
@@ -70,38 +49,68 @@ const tuples = new Set()
 for (const b of branches) {
   for (const m of b.matchAll(/(\d+)\.(\d+)\.(\d+)-/g)) tuples.add(m[1] + '.' + m[2] + '.' + m[3])
 }
-ok('范围覆盖 0.1.5 / 0.1.6 / 0.1.7 三个 tuple', ['0.1.5', '0.1.6', '0.1.7'].every((t) => tuples.has(t)), [...tuples].join(', '))
-ok('范围上界不含 0.2（下一个 minor 应被排除）', /<0\.2\.0-0/.test(String(range)) && />=0\.2/.test(String(range)) === false, String(range))
+ok('范围覆盖 0.1.5 / 0.1.6 / 0.1.7 / 0.2.0 / 0.2.1 五个 tuple', ['0.1.5', '0.1.6', '0.1.7', '0.2.0', '0.2.1'].every((t) => tuples.has(t)), [...tuples].join(', '))
+ok('范围上界是 0.3（下一个 minor 应被排除）', /<0\.3\.0-0/.test(String(range)) && />=0\.3/.test(String(range)) === false, String(range))
 
-// ── 用真实 semver 交叉验证（机器上有 DSH 时装）────────────────────────────────────
-const semverPath = findSemver()
-if (semverPath === undefined) {
-  console.log('  --  没找到 DSH 安装里的 semver，跳过实测（结构检查已通过）')
+// ── 版本判定：本仓库零依赖，这里实现一个只覆盖本项目范围形状的 satisfies ──────────
+//
+// 关键仍是 node-semver 的**预发布规则**：带预发布标签的版本，只有在某个比较符的
+// major.minor.patch 元组与之完全相同、且该比较符自身也带预发布标签时才被放行。
+function compareVersion(a, b) {
+  const [coreA, preA] = String(a).split('-')
+  const [coreB, preB] = String(b).split('-')
+  const na = coreA.split('.').map(Number)
+  const nb = coreB.split('.').map(Number)
+  for (let i = 0; i < 3; i += 1) {
+    if (na[i] !== nb[i]) return na[i] < nb[i] ? -1 : 1
+  }
+  if (preA === undefined && preB === undefined) return 0
+  if (preA === undefined) return 1   // 正式版 > 预发布版
+  if (preB === undefined) return -1
+  if (preA === preB) return 0
+  return preA < preB ? -1 : 1
+}
+
+function satisfies(version, range) {
+  const value = String(version)
+  const tuple = value.split('-')[0]
+  const isPre = value.includes('-')
+  for (const branch of String(range).split('||').map((s) => s.trim()).filter((s) => s !== '')) {
+    let lower
+    let upper
+    for (const comparator of branch.split(/\s+/).filter((s) => s !== '')) {
+      if (comparator.startsWith('>=')) lower = comparator.slice(2)
+      else if (comparator.startsWith('<')) upper = comparator.slice(1)
+    }
+    if (lower !== undefined && compareVersion(value, lower) < 0) continue
+    if (upper !== undefined && compareVersion(value, upper) >= 0) continue
+    if (isPre) {
+      const sameTuple = [lower, upper].filter((c) => c !== undefined && c.includes('-') && c.split('-')[0] === tuple)
+      if (sameTuple.length === 0) continue
+    }
+    return true
+  }
+  return false
+}
+
+const missing = published.filter((v) => satisfies(v, range) === false)
+ok('接纳全部 ' + published.length + ' 个已发布版本', missing.length === 0, '被拒: ' + missing.join(', '))
+const admitted = rejected.filter((v) => satisfies(v, range))
+ok('拒绝 ' + rejected.length + ' 个不该接纳的版本', admitted.length === 0, '被误纳: ' + admitted.join(', '))
+
+// ── 本机已装的 harness 必须落在范围内 ───────────────────────────────────────────
+//
+// 这就是"升级后不会变成声明失配"的直接检查。DSH 0.2 把包放在 asar 与 pnpm 链接后面
+// （profiles/node_modules/@deepseek-ai/* 是指向 app 目录的链接，更新后可能悬空），
+// 磁盘上没有稳定的版本清单文件，所以直接问 CLI 自己。取不到就跳过——CI 里没有 dsh。
+// Windows 上 dsh 是 .cmd：不带 shell 的 spawn 启不动它（ENOENT），必须过一层 shell。
+const probe = spawnSync('dsh', ['--version'], { encoding: 'utf8', timeout: 20000, shell: true })
+const raw = probe.status === 0 && typeof probe.stdout === 'string' ? probe.stdout.trim() : ''
+const installedVersion = (raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/) ?? [])[0]
+if (installedVersion === undefined) {
+  console.log('  --  取不到已装的 dsh 版本（dsh --version 不可用），跳过"已装版本在范围内"这一条')
 } else {
-  const require = createRequire(pathToFileURL(semverPath))
-  const semver = require(semverPath)
-  const missing = published.filter((v) => semver.satisfies(v, range) === false)
-  ok('接纳全部 ' + published.length + ' 个已发布版本', missing.length === 0, '被拒: ' + missing.join(', '))
-  const admitted = rejected.filter((v) => semver.satisfies(v, range))
-  ok('拒绝 ' + rejected.length + ' 个不该接纳的版本', admitted.length === 0, '被误纳: ' + admitted.join(', '))
-  // 安装里的 harness 版本必须落在范围内 —— 这就是"升级后不会变成声明失配"的直接检查。
-  // 从 semver 的位置逐级向上找 @deepseek-ai/dsh-tools：pnpm 会把依赖放在不同深度，
-  // 写死层数会在换包管理器时静默跳过这条断言（第一版就是这么漏掉的）。
-  let probe = semverPath
-  let installed
-  for (let i = 0; i < 6 && installed === undefined; i += 1) {
-    const candidate = join(probe, '..', '@deepseek-ai', 'dsh-tools', 'package.json')
-    if (existsSync(candidate)) installed = candidate
-    const parent = dirname(dirname(probe))
-    if (parent === probe || parent === '') break
-    probe = parent
-  }
-  if (installed === undefined) {
-    console.log('  --  没定位到已装的 @deepseek-ai/dsh-tools，跳过"已装版本在范围内"这一条')
-  } else {
-    const version = JSON.parse(readFileSync(installed, 'utf8')).version
-    ok('本机已装的 harness ' + version + ' 落在范围内', semver.satisfies(version, range), 'range=' + String(range))
-  }
+  ok('本机已装的 harness ' + installedVersion + ' 落在范围内', satisfies(installedVersion, range), 'range=' + String(range))
 }
 
 console.log(problems.length === 0 ? '\n引擎范围检查: OK' : '\n引擎范围检查 FAILED:\n  ' + problems.join('\n  '))

@@ -130,7 +130,13 @@ if (real === undefined) {
 const residentCalls = [...hostSource.matchAll(/\bctx\.skills\s*\.\s*(\w+)/g)].map((m) => m[1])
 const registering = residentCalls.filter((name) => /register|install|add|create|write/i.test(name))
 ok('host.js 没有任何"往常驻目录注册技能"的调用（ctx.skills.* 只有读）', registering.length === 0, registering.join(', '))
-ok('入门库不在 .dsh/skills 这类常驻路径下', starterRoot.includes('.dsh') === false && starterRoot.includes('skills' + sep + 'skills') === false)
+// 判据只排除**常驻根**（`.dsh/skills`、`skills/skills`），不是"任何含 `.dsh` 的路径"：
+// DSH 0.2 起插件自身就装在 `<DSH_HOME>/plugins/` 下，插件根必然含 `.dsh`——用后者会误报。
+// 产品不变量不变：入门库绝不能落在会被扫描进常驻目录的位置。
+const residentRootPattern = /(^|[\\/])\.dsh[\\/]+skills([\\/]|$)/i
+ok('入门库不在 .dsh/skills 这类常驻路径下',
+  residentRootPattern.test(starterRoot) === false && starterRoot.includes('skills' + sep + 'skills') === false,
+  starterRoot)
 
 // 目录名不以点开头的库对 DSH 扫描器是可见的——这是它**必须**在插件包内的原因之一：
 // 它在 node_modules 里，而 DSH 的 skill 扫描器只看工作区与 .dsh。

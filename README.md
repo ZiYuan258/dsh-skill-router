@@ -150,7 +150,7 @@ DSH 把会话技能目录注入到**每一次**模型请求里（`dsh-tool-skill
 
 ## 安装
 
-需要 DSH 与一个 profile。`dsh.engines.dsh` 声明 `>=0.1.5-rc.1`——那是**已验证可用的版本**，不是"需要这么新"：本插件只用到 `ctx.tools.register` 与 `ctx.fs.*` 这一小组 API，无事件钩子、无 import；更早的版本我没有验证过，**不想过度声明兼容性**。`ctx.get` / `ctx.effect` / `ctx.skills` 全部是**可选**的，缺失时降级而不是崩溃（由 `test/minimal-host.mjs` 钉住）。
+需要 DSH 与一个 profile。`dsh.engines.dsh` 声明一个**逐一枚举过的范围**（0.1.0-rc.1 起，逐 tuple 列到 0.2.1，上界 0.3）：node-semver 只放行"某个比较符的 major.minor.patch 元组完全相同、且该比较符自身也带预发布标签"的预发布版本，所以"覆盖所有 rc"没有捷径、只能逐 tuple 写——`test/engine-range.mjs` 钉住这条。本插件只用到 `ctx.tools.register` 与 `ctx.fs.*` 这一小组 API，无事件钩子、无 import；`ctx.get` / `ctx.effect` / `ctx.skills` 全部是**可选**的，缺失时降级而不是崩溃（由 `test/minimal-host.mjs` 钉住）。
 
 ```sh
 # 从 git 安装（推荐）
@@ -410,7 +410,7 @@ Get-Content "D:\work\.skill-src\skill-index.tsv" -TotalCount 1
 18  系统化·调试 (systematic-debugging)              skill_ref    第 67 轮
 
 已读到本会话最早一条记录，上面的数字是完整的。
-dsh-skill-router v1.18.0 · 第 43 页 · 已读完 · 可翻页 是
+dsh-skill-router v1.18.1 · 第 43 页 · 已读完 · 可翻页 是
 ```
 
 > **v1.17.1 起：搜索结果也入列；v1.17.2 起：查询兜底；v1.17.3 起：run_code 内嵌调用。** 一次成功的 `skill_search` 以前在这个标签页里不可见——搜索是"找"不是"用"，不计入加载计数。v1.17.1 让标签页显示搜索*找到*了哪些技能（从 `tool/result` 事件的 hits 解析，标 `skill_search` 以区别于 `skill_load`）。但 `eventSource` 窗口实际只含 `tool/call` 不含 `tool/result`（dsh-better-sidebar 的 `changes.ops` 路由正是为此而建），所以 v1.17.1 在生产里仍看不到。v1.17.3 加了第三遍：对结果不在窗口里的搜索，显示查询本身（前缀 🔍），让"搜过"这件事至少看得见。v1.17.3 发现根因：agent 用 `run_code` 作唯一工具接口，`skill_search`/`skill_load` 调用嵌在 TypeScript 代码体里，不是独立的 `tool/call` 事件——前三遍全找不到。v1.17.3 在第一遍里解析 `run_code` 的 `code` 参数，用正则提取内嵌的 `tools.skill_search({query:…})` 和 `tools.skill_load({name:…})`，让它们也入列。搜索本身仍不算一次加载调用。
@@ -460,7 +460,7 @@ inject: (sessionId, binding) => {
 
 **每读到一页就当场并入累积账本。** 这一条比判据更关键：累积器曾经只在账本**通知**时写入，而通知可能很久不来。于是会出现"读取成功但没有留存"——`loadOlder()` 让一页进入窗口，界面渲染出它，在下次通知之前它随滑窗被挤出去，**累积账本从未记到它**。现在每页在它还在窗口里时就并入。停止翻页**不影响实时尾部**——之后出现的调用照样立刻显示。
 
-**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.18.0 · 第 43 页 · 已读完 · 可翻页 是`。
+**最后一行说明你跑的是哪一版。** 客户端半由 web 服务带 `cache-control: immutable` 提供、不能被 Node 测试 import、服务端字节又挡在 Desktop 的能力校验后面，所以"浏览器跑的是哪一版"曾是唯一无法回答的问题。现在它印在界面上：`dsh-skill-router v1.18.1 · 第 43 页 · 已读完 · 可翻页 是`。
 
 **中文名只用于显示。** 技能名是 `skill_load`、索引检索和 `/skill` 命令的匹配键，所以：
 
@@ -782,7 +782,7 @@ npm test
 | `stale-and-duplicates.mjs` | 索引过期（目录已删）不再使 `skill_search` 抛异常、过期条目被标 `stale`；重名候选的 repo 列表对模型可见；弱匹配不被当作命中 |
 | `matching-expansion.mjs` | v1.17 词干+同义词+中英映射：`debugging`→`debug`、`deploy`→`release`、`性能`→`performance` 等跨形/跨义/跨语言匹配；精确词仍命中（回归） |
 | `redos-guard.mjs` | `js/polynomial-redos` 的护栏：替代函数与它替换的正则**逐例等价**（含反斜杠结尾的 Windows 路径，第一版函数只删 `/`，20 例里错 8 例）、最坏输入为常数级、调用点确实走函数而非又写回正则、`host.js` 里"量词 + $"正则**只能有 1 条**（每多一条都要重新论证输入是否有界） |
-| `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7、排除 0.2；并在本机找到真实 semver 时实测接纳全部 11 个已发布版本、拒绝 0.2.0，且**已装的 harness 版本落在范围内** |
+| `engine-range.mjs` | `dsh.engines.dsh` 的范围：每条 OR 分支都带预发布标签（node-semver 的规则，缺了就覆盖不到该 tuple 的 rc）、覆盖 0.1.5/0.1.6/0.1.7/0.2.0/0.2.1、上界 0.3；本仓库零依赖，所以自带一个够用的 `satisfies`，实测接纳 16 个已发布版本、拒绝 3 个越界版本，并问 `dsh --version` 确认**已装的 harness 落在范围内**（CI 无 dsh 时跳过） |
 | `discovery-report.mjs` | **实验读数脚本**（`node tools/discovery-report.mjs`）：按**随机分臂**汇总实验（treatment vs control，而不是"注入 vs 未注入"——后者是不同任务总体），主指标只算**每会话第一个 HIGH**（唯一可证明先于任何提示的观测），并，并且**把"未知"与"0 次"严格分开**——按回合的计数天生右截断（回合结束才在下一回合落盘），未配对的回合必须报成 unknown 而不是 search=0，否则上升的搜索率会被算成没变化；配对键是 **`(sessionKey, turn)`** 而不是 `turn`（实测 14 个 turn 号跨会话重复），且按回合**真正去重**（多条发现记录取最后一条、多条计数记录逐项求和，否则同一回合会在分子分母里各算两次）；无会话标签的旧记录单独计数；坏行不吞掉；`indexRows` 出现多个取值时报警（语料换过）；token 文本默认不打印 |
 | `phase2-control.test.mjs` | Phase-2 四组的**纯控制逻辑**（归档至 `experimental/phase2/`）：组别解析（未设变量保留旧的随机行为、**非法值 fail-closed 而不是回退到随机组**）、人工指定技能列表（负对照的空数组合法、去重不换序、坏 JSON / 非字符串项 / 不安全技能名被拒、超限**报错而不静默截断**）、`<skill_content source="library">` 正文信封（拒绝非库来源、不安全名、空正文、被截断的正文） |
 | `discovery-ranking.mjs` | **候选生成器的质量护栏**：语料频率过滤（全库都有的词不得参与评分、`corpusFrequency` 如实报道比例、阈值边界 80% 保留 / >80% 丢弃、全部无判别力时给 `no-discriminating-token`）、按技能名去重（同名只占一个名额、保留最高分）、**tier 在去重后的有效 token 上计算**（100% 词不能伪造 HIGH）、真正的强候选仍是 HIGH；有真库时抽样验证 `skill`/`skills` 确为 100% 词、且安全审计任务把 `semgrep` 排第一、代码审查任务把 `code-review` 类排前、候选名不重复 |
