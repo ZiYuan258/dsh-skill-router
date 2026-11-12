@@ -11,8 +11,8 @@
 // 0.1.x 的 rc"必须为每个 tuple 显式写一个带预发布的分支，没有捷径。
 //
 // 这个仓库零依赖，所以这里不引入 semver：自己实现一个够用的 satisfies（见文件下半段）。
-// 已装 harness 的版本问 CLI 自己（\`dsh --version\`）——DSH 0.2 把包放在 asar 与 pnpm 链接
-// 后面，磁盘上没有稳定的版本清单文件。
+// 已装 harness 的版本从 DSH 自己注入的环境变量里取（DSH_INSTALL_DIR + DSH_NODE_EXECUTABLE），
+// 取不到再退回 dsh --version；两条路径见文件下半段。
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
@@ -102,13 +102,36 @@ ok('拒绝 ' + rejected.length + ' 个不该接纳的版本', admitted.length ==
 //
 // 这就是"升级后不会变成声明失配"的直接检查。DSH 0.2 把包放在 asar 与 pnpm 链接后面
 // （profiles/node_modules/@deepseek-ai/* 是指向 app 目录的链接，更新后可能悬空），
-// 磁盘上没有稳定的版本清单文件，所以直接问 CLI 自己。取不到就跳过——CI 里没有 dsh。
+// 磁盘上没有稳定的版本清单文件，所以问 DSH 自己注入的环境变量，退回 CLI。取不到就跳过——CI 里都没有。
 // Windows 上 dsh 是 .cmd：不带 shell 的 spawn 启不动它（ENOENT），必须过一层 shell。
-const probe = spawnSync('dsh', ['--version'], { encoding: 'utf8', timeout: 20000, shell: true })
-const raw = probe.status === 0 && typeof probe.stdout === 'string' ? probe.stdout.trim() : ''
-const installedVersion = (raw.match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/) ?? [])[0]
+// 路径一：DSH 给子 shell 注入了 DSH_NODE_EXECUTABLE（桌面版是 Electron 可执行文件）与
+// DSH_INSTALL_DIR（安装目录，指向 asar 内部）。让前者以 ELECTRON_RUN_AS_NODE=1 读
+// <DSH_INSTALL_DIR>/package.json —— asar 里的文件只有 Electron 运行时读得到，普通 node 不行。
+const probeEnvVersion = () => {
+  const exe = process.env.DSH_NODE_EXECUTABLE
+  const dir = process.env.DSH_INSTALL_DIR
+  if (exe === undefined || dir === undefined) return undefined
+  const script = "process.stdout.write(require(process.env.DSH_INSTALL_DIR + '/package.json').version)"
+  const result = spawnSync(exe, ['-e', script], {
+    encoding: 'utf8',
+    timeout: 20000,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  })
+  const text = result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : ''
+  return new RegExp('^[0-9]+[.][0-9]+[.][0-9]+').test(text) ? text : undefined
+}
+
+// 路径二：CLI。0.2.2-rc.2 起发行版不再随包下发 dsh 包装器（resources/runtime 被清空），
+// 所以这条只在旧版本或自行装了 CLI 的机器上命中。
+const probeCliVersion = () => {
+  const result = spawnSync('dsh', ['--version'], { encoding: 'utf8', timeout: 20000, shell: true })
+  const text = result.status === 0 && typeof result.stdout === 'string' ? result.stdout.trim() : ''
+  return (text.match(new RegExp('[0-9]+[.][0-9]+[.][0-9]+(?:-[0-9A-Za-z.-]+)?')) ?? [])[0]
+}
+
+const installedVersion = probeEnvVersion() ?? probeCliVersion()
 if (installedVersion === undefined) {
-  console.log('  --  取不到已装的 dsh 版本（dsh --version 不可用），跳过"已装版本在范围内"这一条')
+  console.log('  --  取不到已装的 dsh 版本（DSH_INSTALL_DIR 与 dsh --version 都不可用），跳过"已装版本在范围内"这一条')
 } else {
   ok('本机已装的 harness ' + installedVersion + ' 落在范围内', satisfies(installedVersion, range), 'range=' + String(range))
 }
